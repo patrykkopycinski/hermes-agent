@@ -360,13 +360,22 @@ def test_dashboard_supervised_when_env_set(
         cmd="gateway run",
     )
 
-    # Poll for both slots to report want-up, instead of a blind
-    # time.sleep(5). Under CI load the supervised gateway + dashboard
-    # can take well over 5s to finish imports and bind.
+    # Wait for the redirect to fire (the breadcrumb appears in docker
+    # logs when the CMD process reaches the redirect logic). This is
+    # the same signal the other gateway-run tests use.
+    # A fixed time.sleep(5) was racing: start_container returns when
+    # cont-init finishes, but the redirect (which creates the
+    # gateway-default s6 slot) happens later in the CMD process.
+    wait_for_docker_logs(
+        container_name, "s6 supervision", deadline_s=60.0,
+    )
+
+    # Poll for both slots to report want-up. The redirect has fired
+    # but s6-supervise may still be spinning up the services.
     ok_gateway, gw_state = poll_container(
         container_name,
         "/command/s6-svstat /run/service/gateway-default | grep -q 'want up'",
-        deadline_s=60.0,
+        deadline_s=30.0,
     )
     assert ok_gateway, (
         f"gateway-default slot not want-up: {gw_state!r}"
@@ -375,7 +384,7 @@ def test_dashboard_supervised_when_env_set(
     ok_dash, dash_state = poll_container(
         container_name,
         "/command/s6-svstat /run/service/dashboard | grep -q 'want up'",
-        deadline_s=60.0,
+        deadline_s=30.0,
     )
     assert ok_dash, (
         f"dashboard slot not want-up: {dash_state!r}"
