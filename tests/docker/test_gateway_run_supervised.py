@@ -25,7 +25,6 @@ import time
 
 from tests.docker.conftest import (
     docker_exec_sh,
-    poll_container,
     start_container,
     wait_for_docker_logs,
 )
@@ -370,24 +369,31 @@ def test_dashboard_supervised_when_env_set(
         container_name, "s6 supervision", deadline_s=60.0,
     )
 
-    # Poll for both slots to report want-up. The redirect has fired
-    # but s6-supervise may still be spinning up the services.
-    ok_gateway, gw_state = poll_container(
-        container_name,
-        "/command/s6-svstat /run/service/gateway-default | grep -q 'want up'",
-        deadline_s=30.0,
-    )
+    # Poll for both slots to report want-up, using the same
+    # _svstat_wants_up helper the other tests use. A simple
+    # `grep 'want up'` is wrong: when the service is already up,
+    # s6-svstat output is "up (pid ...) Ns" with no literal "want up"
+    # — the want-up intent is implied by the absence of "want down".
+    ok_gateway = False
+    end = time.monotonic() + 30.0
+    while time.monotonic() < end:
+        if _svstat_wants_up(container_name, "gateway-default"):
+            ok_gateway = True
+            break
+        time.sleep(0.5)
     assert ok_gateway, (
-        f"gateway-default slot not want-up: {gw_state!r}"
+        f"gateway-default slot not want-up: {_svstat(container_name)!r}"
     )
 
-    ok_dash, dash_state = poll_container(
-        container_name,
-        "/command/s6-svstat /run/service/dashboard | grep -q 'want up'",
-        deadline_s=30.0,
-    )
+    ok_dash = False
+    end = time.monotonic() + 30.0
+    while time.monotonic() < end:
+        if _svstat_wants_up(container_name, "dashboard"):
+            ok_dash = True
+            break
+        time.sleep(0.5)
     assert ok_dash, (
-        f"dashboard slot not want-up: {dash_state!r}"
+        f"dashboard slot not want-up: {_svstat(container_name, 'dashboard')!r}"
     )
 
 
