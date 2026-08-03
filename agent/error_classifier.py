@@ -64,6 +64,7 @@ class FailoverReason(enum.Enum):
 
     # Provider-specific
     thinking_signature = "thinking_signature"  # Anthropic thinking block sig invalid
+    tool_result_adjacency = "tool_result_adjacency"  # Anthropic tool_use lacks adjacent tool_result — repaired by conversion, retry
     long_context_tier = "long_context_tier"    # Anthropic "extra usage" tier gate
     oauth_long_context_beta_forbidden = "oauth_long_context_beta_forbidden"  # Anthropic OAuth subscription rejects 1M context beta — disable beta and retry
     llama_cpp_grammar_pattern = "llama_cpp_grammar_pattern"  # llama.cpp json-schema-to-grammar rejects regex escapes in `pattern` / `format` — strip from tools and retry
@@ -691,6 +692,39 @@ def classify_api_error(
     ):
         return _result(
             FailoverReason.thinking_signature,
+            retryable=True,
+            should_compress=False,
+        )
+
+    # Anthropic tool_use/tool_result adjacency violation (400).  Message body:
+    # "`tool_use` ids were found without `tool_result` blocks immediately
+    # after: toolu_XXX. Each `tool_use` block must have a corresponding
+    # `tool_result` block in the next message."
+    #
+    # Recovery: the conversion pipeline's ordering pass
+    # (``_hoist_tool_results_to_front``) repairs the shape on the next attempt,
+    # so a plain retry self-heals.  Classifying this as retryable is what stops
+    # it being terminal.
+    #
+    # Why this matters: as a non-retryable client error, ONE malformed pair
+    # bricked the whole session permanently.  The offending history was
+    # persisted, so every later prompt rebuilt the same invalid payload and
+    # failed identically — the agent went silent for good while context (and
+    # cost) grew on each retry (observed: 70k → 151k tokens over 5 retries;
+    # the agent only recovered after its session row was cleared by hand).
+    # Never let a repairable payload-shape error be terminal.
+    if (
+        status_code == 400
+        and "tool_use" in error_msg
+        and "tool_result" in error_msg
+        and (
+            "immediately after" in error_msg
+            or "without `tool_result`" in error_msg
+            or "without tool_result" in error_msg
+        )
+    ):
+        return _result(
+            FailoverReason.tool_result_adjacency,
             retryable=True,
             should_compress=False,
         )
