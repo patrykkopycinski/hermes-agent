@@ -62,11 +62,29 @@ describe('clearActiveSessionTodos (turn-end cleanup)', () => {
     vi.useRealTimers()
   })
 
-  it('drops a still-active list when the turn has ended', () => {
+  it('lingers a still-active list on turn end instead of deleting it instantly', () => {
     setSessionTodos('s1', [todo('a', 'completed'), todo('b', 'in_progress')])
 
     clearActiveSessionTodos('s1')
 
+    // Still visible right after the turn ends — the user gets to see the
+    // final state (2/3 items done, say) instead of the panel vanishing the
+    // instant the last message lands.
+    expect($todosBySession.get().s1).toHaveLength(2)
+
+    vi.advanceTimersByTime(5_000)
+
+    expect($todosBySession.get().s1).toBeUndefined()
+  })
+
+  it('does not re-pin a still-active list forever — it still clears on its own', () => {
+    setSessionTodos('s1', [todo('a', 'pending')])
+
+    clearActiveSessionTodos('s1')
+    vi.advanceTimersByTime(3_999)
+    expect($todosBySession.get().s1).toHaveLength(1)
+
+    vi.advanceTimersByTime(1)
     expect($todosBySession.get().s1).toBeUndefined()
   })
 

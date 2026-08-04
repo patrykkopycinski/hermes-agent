@@ -218,6 +218,10 @@ export interface Translations {
     message: (reason: string) => string
   }
 
+  packageStalenessBanner: {
+    message: (packaged: string, current: string) => string
+  }
+
   titlebar: {
     hideSidebar: string
     showSidebar: string
@@ -2128,6 +2132,7 @@ export interface Translations {
       skip: string
       skipped: string
       continueLabel: string
+      expired: string
     }
     tool: {
       code: string

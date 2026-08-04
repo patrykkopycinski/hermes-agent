@@ -2328,8 +2328,17 @@ class MCPServerTask:
         finally:
             for t in (shutdown_task, reconnect_task):
                 if not t.done():
-                    t.cancel()
+                    # t.cancel() itself (not just the subsequent await) can
+                    # raise RuntimeError('Event loop is closed') when this
+                    # coroutine is finalized during interpreter/loop
+                    # shutdown -- e.g. its Task is GC'd while suspended
+                    # here and Python throws GeneratorExit into it via
+                    # close(). cancel() used to sit outside this try/except,
+                    # so that RuntimeError escaped uncaught and surfaced as
+                    # "Exception ignored in coroutine ...". Keep cancel()
+                    # inside the guarded block so it's covered too.
                     try:
+                        t.cancel()
                         await t
                     except (asyncio.CancelledError, Exception):
                         pass
@@ -3471,8 +3480,12 @@ class MCPServerTask:
         finally:
             for task in (shutdown_task, reconnect_task):
                 if not task.done():
-                    task.cancel()
+                    # See _wait_for_reconnect_or_shutdown for why cancel()
+                    # itself must be inside the try: it can raise
+                    # RuntimeError('Event loop is closed') during
+                    # interpreter/loop shutdown, not just the await.
                     try:
+                        task.cancel()
                         await task
                     except (asyncio.CancelledError, Exception):
                         pass

@@ -172,6 +172,11 @@ export const zhHant = defineLocale({
     message: reason => `軟體繪圖已啟用 — 偵測到遠端顯示（${reason}）。為防止畫面閃爍，已停用 GPU 加速。`
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `此應用程式打包時的版本（${packaged}）比目前的簽出（${current}）舊。請透過 \`hermes desktop\` 重新啟動以重新打包並取得最新修正。`
+  },
+
   titlebar: {
     hideSidebar: '隱藏側邊欄',
     showSidebar: '顯示側邊欄',
@@ -2369,7 +2374,8 @@ export const zhHant = defineLocale({
       placeholder: '輸入您的答案…',
       skip: '略過',
       skipped: '已略過',
-      continueLabel: '繼續'
+      continueLabel: '繼續',
+      expired: '已無法回答 — 該輪對話已在您回覆前結束'
     },
     tool: {
       code: '程式碼',

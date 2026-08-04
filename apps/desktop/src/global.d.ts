@@ -217,6 +217,7 @@ declare global {
       onBootstrapEvent: (callback: (payload: DesktopBootstrapEvent) => void) => () => void
       getVersion: () => Promise<DesktopVersionInfo>
       getRemoteDisplayReason?: () => Promise<string | null>
+      getPackageStaleness?: () => Promise<DesktopPackageStaleness | null>
       updates: {
         check: () => Promise<DesktopUpdateStatus>
         apply: (opts?: DesktopUpdateApplyOptions) => Promise<DesktopUpdateApplyResult>
@@ -279,6 +280,12 @@ export interface DesktopVersionInfo {
   nodeVersion: string
   platform: string
   hermesRoot: string
+}
+
+export interface DesktopPackageStaleness {
+  stale: boolean
+  packagedCommit: string | null
+  currentCommit: string | null
 }
 
 export type DesktopUninstallMode = 'full' | 'gui' | 'lite'

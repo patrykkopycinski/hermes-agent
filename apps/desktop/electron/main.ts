@@ -117,6 +117,7 @@ import {
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { ensureMainWindow } from './main-window-lifecycle'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
+import { computePackageStaleness } from './package-staleness'
 import { createKeepAwake } from './power-save'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
 import * as remoteLifecycle from './remote-lifecycle'
@@ -2225,6 +2226,50 @@ async function resolveHealedBranch(updateRoot, branch) {
   }
 
   return 'main'
+}
+
+// Detects a packaged .app that's running older code than the checkout it was
+// built from currently has (see package-staleness.ts for the full root-cause
+// writeup: #53728's clarify-prompt fix landed in dist/ one build ahead of the
+// packaged app.asar because the app was launched directly instead of via
+// `hermes desktop`, which is the only path that re-checks the build stamp).
+// Cheap and safe to call on every boot: two fs reads (install-stamp.json,
+// already cached in INSTALL_STAMP) plus one local `git rev-parse HEAD` -- no
+// network. Returns null when we can't form an opinion (dev run with no
+// install stamp, non-git checkout, etc.) rather than false-alarming.
+async function checkPackageStaleness() {
+  if (!INSTALL_STAMP) {
+    return null
+  }
+
+  const updateRoot = resolveUpdateRoot()
+
+  if (!directoryExists(path.join(updateRoot, '.git'))) {
+    return null
+  }
+
+  try {
+    const head = await runGit(['rev-parse', 'HEAD'], { cwd: updateRoot })
+    const currentCommit = head.code === 0 ? head.stdout.trim() : null
+
+    const result = computePackageStaleness({
+      packagedCommit: INSTALL_STAMP.commit,
+      currentCommit
+    })
+
+    if (result.stale) {
+      rememberLog(
+        `[hermes] packaged app is stale: running ${result.packagedCommit?.slice(0, 12)}, ` +
+          `checkout HEAD is ${result.currentCommit?.slice(0, 12)}. Restart via \`hermes desktop\` to repackage.`
+      )
+    }
+
+    return result
+  } catch (err) {
+    rememberLog(`[hermes] package staleness check failed: ${err?.message || err}`)
+
+    return null
+  }
 }
 
 async function checkUpdates() {
@@ -9944,6 +9989,8 @@ ipcMain.handle('hermes:updates:check', async () =>
     fetchedAt: Date.now()
   }))
 )
+
+ipcMain.handle('hermes:package-staleness:get', async () => checkPackageStaleness().catch(() => null))
 
 ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
   applyUpdates(payload || {}).catch(error => ({

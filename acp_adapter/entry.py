@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 from hermes_constants import get_hermes_home
 
@@ -246,18 +247,42 @@ def main(argv: list[str] | None = None) -> None:
     import acp
     from .server import HermesACPAgent
 
-    # MCP tool discovery from config.yaml — run before asyncio.run() so
-    # it's safe to use blocking waits.  (ACP also registers per-session
-    # MCP servers dynamically via asyncio.to_thread inside the event
-    # loop; that path is unaffected.)  Moved from model_tools.py module
-    # scope to avoid freezing the gateway's loop on lazy import (#16856).
-    try:
-        from tools.mcp_tool import discover_mcp_tools
-        discover_mcp_tools()
-    except Exception:
-        logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
+    # MCP tool discovery from config.yaml. Historically this ran
+    # synchronously on the main thread before asyncio.run() (moved out of
+    # model_tools.py module scope to avoid freezing the gateway's loop on
+    # lazy import — #16856). That kept it off the event loop, but it also
+    # meant the whole ACP handshake (initialize + session/new) sat behind
+    # however long every configured MCP server took to connect — 100s+
+    # with a couple of slow/remote servers, which starves clients with a
+    # tight startup budget (e.g. Buzz's 10s model-list probe).
+    #
+    # discover_mcp_tools() is idempotent and lock-guarded (tools/mcp_tool.py),
+    # so it's safe to run on its own daemon thread concurrently with the ACP
+    # loop instead: the loop starts accepting initialize/session/new
+    # immediately, and HermesACPAgent.prompt() waits for this event before
+    # running the first turn (off-loop, via asyncio.to_thread) so mcp__
+    # tools are still guaranteed registered before any tool call — just no
+    # longer before the handshake. This still keeps discovery off the
+    # gateway's loop (#16856's actual constraint), it just no longer blocks
+    # the calling thread that starts the loop.
+    mcp_discovery_done = threading.Event()
 
-    agent = HermesACPAgent()
+    def _discover_mcp_tools_background() -> None:
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+            discover_mcp_tools()
+        except Exception:
+            logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
+        finally:
+            mcp_discovery_done.set()
+
+    threading.Thread(
+        target=_discover_mcp_tools_background,
+        name="mcp-startup-discovery",
+        daemon=True,
+    ).start()
+
+    agent = HermesACPAgent(mcp_discovery_done=mcp_discovery_done)
     try:
         asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
     except KeyboardInterrupt:

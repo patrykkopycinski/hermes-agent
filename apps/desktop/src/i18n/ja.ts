@@ -178,6 +178,11 @@ export const ja = defineLocale({
       `ソフトウェアレンダリングが有効です — リモートディスプレイを検出しました（${reason}）。ちらつきを防ぐため GPU アクセラレーションは無効化されています。`
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `このアプリは現在のチェックアウト（${current}）より古いビルド（${packaged}）からパッケージ化されています。最新の修正を反映するには \`hermes desktop\` で再起動してパッケージを作り直してください。`
+  },
+
   titlebar: {
     hideSidebar: 'サイドバーを非表示',
     showSidebar: 'サイドバーを表示',
@@ -2443,7 +2448,8 @@ export const ja = defineLocale({
       placeholder: '回答を入力…',
       skip: 'スキップ',
       skipped: 'スキップ済み',
-      continueLabel: '続行'
+      continueLabel: '続行',
+      expired: '回答できません — 応答する前にターンが終了しました'
     },
     tool: {
       code: 'コード',

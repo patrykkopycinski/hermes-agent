@@ -172,6 +172,11 @@ export const zh: Translations = {
     message: reason => `软件渲染已启用 — 检测到远程显示（${reason}）。为防止画面闪烁，已禁用 GPU 加速。`
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `此应用打包时的版本（${packaged}）比当前检出（${current}）旧。请通过 \`hermes desktop\` 重新启动以重新打包并获取最新修复。`
+  },
+
   titlebar: {
     hideSidebar: '隐藏侧边栏',
     showSidebar: '显示侧边栏',
@@ -2685,7 +2690,8 @@ export const zh: Translations = {
       placeholder: '输入你的答案…',
       skip: '跳过',
       skipped: '已跳过',
-      continueLabel: '继续'
+      continueLabel: '继续',
+      expired: '已无法回答 — 该轮对话已在你回复前结束'
     },
     tool: {
       code: '代码',

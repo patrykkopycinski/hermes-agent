@@ -177,6 +177,11 @@ export const en: Translations = {
       `Software rendering active — remote display detected (${reason}). GPU acceleration is disabled to prevent flickering.`
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `This app was packaged from an older build (${packaged}) than the checkout it runs from (${current}). Restart via \`hermes desktop\` to repackage and pick up the latest fixes.`
+  },
+
   titlebar: {
     hideSidebar: 'Hide sidebar',
     showSidebar: 'Show sidebar',
@@ -2513,7 +2518,8 @@ export const en: Translations = {
       placeholder: 'Type your answer…',
       skip: 'Skip',
       skipped: 'Skipped',
-      continueLabel: 'Continue'
+      continueLabel: 'Continue',
+      expired: 'No longer answerable — the turn ended before you responded'
     },
     tool: {
       code: 'Code',
