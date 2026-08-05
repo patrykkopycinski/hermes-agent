@@ -191,6 +191,11 @@ export const ja = defineLocale({
     dismiss: '閉じる'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `このアプリは現在のチェックアウト（${current}）より古いビルド（${packaged}）からパッケージ化されています。最新の修正を反映するには \`hermes desktop\` で再起動してパッケージを作り直してください。`
+  },
+
   titlebar: {
     hideSidebar: 'サイドバーを非表示',
     showSidebar: 'サイドバーを表示',
@@ -269,10 +274,6 @@ export const ja = defineLocale({
         credits: {
           label: 'クレジット通知',
           description: 'クレジットの利用が停止または復旧しました。'
-        },
-        plugin: {
-          label: 'プラグイン通知',
-          description: 'Hermes がバックグラウンドの間に、デスクトッププラグインが通知を送信しました。'
         }
       },
       test: 'テスト通知を送信',
@@ -1400,12 +1401,6 @@ export const ja = defineLocale({
     search: 'プロファイルを検索...',
     loading: 'プロファイルを読み込み中...',
     newProfile: '新しいプロファイル',
-    importProfile: 'プロファイルをインポート…',
-    exportProfile: 'プロファイルをエクスポート…',
-    imported: 'プロファイルをインポートしました',
-    exported: 'プロファイルをエクスポートしました',
-    failedImport: 'プロファイルのインポートに失敗しました',
-    failedExport: 'プロファイルのエクスポートに失敗しました',
     allProfiles: 'すべてのプロファイル',
     showAllProfiles: 'すべてのプロファイルを表示',
     switchToProfile: name => `${name} に切り替え`,
@@ -2529,8 +2524,7 @@ export const ja = defineLocale({
     layoutNamePlaceholder: fallback => `レイアウト名（${fallback}）`,
     saveApply: '保存して適用',
     notExpressible: 'この配置は互いに噛み合っています（風車型）— 入れ子の分割では表現できません',
-    zoneCount: count => `${count} ゾーン`,
-    tabCount: count => `${count} 個のタブ`
+    zoneCount: count => `${count} ゾーン`
   },
 
   assistant: {
@@ -2600,7 +2594,8 @@ export const ja = defineLocale({
       continueLabel: '続行',
       lateAnswer: (question, choice) => `「${question}」について — 私の回答: ${choice}`,
       lateAnswerTip: 'この回答をフォローアップメッセージとして下書きします',
-      lateAnswerHint: 'この質問はもう回答を待っていません。選択肢を選ぶとフォローアップメッセージとして下書きされます。'
+      lateAnswerHint: 'この質問はもう回答を待っていません。選択肢を選ぶとフォローアップメッセージとして下書きされます。',
+      expired: '回答できません — 応答する前にターンが終了しました'
     },
     tool: {
       copyCode: 'コードをコピー',

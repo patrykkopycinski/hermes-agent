@@ -20,6 +20,7 @@ import { FindBar } from '@/components/find-bar'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { NotificationStack } from '@/components/notifications'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
+import { PackageStalenessBanner } from '@/components/package-staleness-banner'
 import { $newSessionTabAction, registerPaneCloser } from '@/components/pane-shell/tree/store'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
@@ -32,7 +33,6 @@ import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
 import { $billingSettingsRequest } from '@/store/billing-block'
-import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
@@ -179,10 +179,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const messagingSessions = useStore($messagingSessions)
-  const sessions = useStore($sessions)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const profileScope = useStore($profileScope)
-  const boot = useStore($desktopBoot)
 
   const routedSessionId = routeSessionId(location.pathname)
   const routedSessionIdRef = useRef(routedSessionId)
@@ -776,17 +774,14 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const previewTarget = useStore($previewTarget)
 
   useDesktopIntegrations({
-    activeProfile: normalizeProfileKey(activeGatewayProfile),
     chatOpen,
     hasPreview: Boolean(previewTarget),
     locationPathname: location.pathname,
     navigate,
-    profileReady: boot.phase === 'renderer.ready',
     refreshSessions,
     resumeExhaustedSessionId,
     routedSessionId,
-    runtimeIdByStoredSessionId: runtimeIdByStoredSessionIdRef,
-    sessions
+    runtimeIdByStoredSessionId: runtimeIdByStoredSessionIdRef
   })
 
   // Pin/unpin the selected session (statusbar keybind + chat header) — pinned
@@ -1012,6 +1007,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       {/* The full real overlay set (mirrors DesktopController's `overlays`). */}
       <RemoteDisplayBanner />
+      <PackageStalenessBanner />
       {!isSecondaryWindow() && <DesktopInstallOverlay />}
       {!isSecondaryWindow() && (
         <DesktopOnboardingOverlay

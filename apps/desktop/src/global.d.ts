@@ -129,12 +129,6 @@ declare global {
       }
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
-      /** Native save dialog; returns the chosen path or null on cancel. */
-      selectSavePath?: (options?: {
-        defaultPath?: string
-        filters?: Array<{ extensions: string[]; name: string }>
-        title?: string
-      }) => Promise<null | string>
       writeClipboard: (text: string) => Promise<boolean>
       readClipboard: () => Promise<string>
       saveImageFromUrl: (url: string) => Promise<boolean>
@@ -279,6 +273,7 @@ declare global {
       onBootstrapEvent: (callback: (payload: DesktopBootstrapEvent) => void) => () => void
       getVersion: () => Promise<DesktopVersionInfo>
       getRemoteDisplayReason?: () => Promise<string | null>
+      getPackageStaleness?: () => Promise<DesktopPackageStaleness | null>
       updates: {
         check: () => Promise<DesktopUpdateStatus>
         apply: (opts?: DesktopUpdateApplyOptions) => Promise<DesktopUpdateApplyResult>
@@ -349,6 +344,12 @@ export interface DesktopVersionInfo {
   nodeVersion: string
   platform: string
   hermesRoot: string
+}
+
+export interface DesktopPackageStaleness {
+  stale: boolean
+  packagedCommit: string | null
+  currentCommit: string | null
 }
 
 export type DesktopUninstallMode = 'full' | 'gui' | 'lite'
@@ -775,8 +776,6 @@ export interface HermesNotification {
   silent?: boolean
   kind?: string
   sessionId?: string
-  /** Dedupe discriminator for session-less notifications (e.g. plugin id). */
-  tag?: string
   actions?: { id: string; text: string }[]
 }
 

@@ -153,6 +153,7 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
+import { computePackageStaleness } from './package-staleness'
 import { createKeepAwake } from './power-save'
 import { FirstRunSetupResetError, runPrimaryBackendStartup } from './primary-backend-startup'
 import { rehomePrimaryConnection } from './primary-connection-rehome'
@@ -2459,6 +2460,50 @@ async function resolveHealedBranch(updateRoot, branch) {
   }
 
   return 'main'
+}
+
+// Detects a packaged .app that's running older code than the checkout it was
+// built from currently has (see package-staleness.ts for the full root-cause
+// writeup: #53728's clarify-prompt fix landed in dist/ one build ahead of the
+// packaged app.asar because the app was launched directly instead of via
+// `hermes desktop`, which is the only path that re-checks the build stamp).
+// Cheap and safe to call on every boot: two fs reads (install-stamp.json,
+// already cached in INSTALL_STAMP) plus one local `git rev-parse HEAD` -- no
+// network. Returns null when we can't form an opinion (dev run with no
+// install stamp, non-git checkout, etc.) rather than false-alarming.
+async function checkPackageStaleness() {
+  if (!INSTALL_STAMP) {
+    return null
+  }
+
+  const updateRoot = resolveUpdateRoot()
+
+  if (!directoryExists(path.join(updateRoot, '.git'))) {
+    return null
+  }
+
+  try {
+    const head = await runGit(['rev-parse', 'HEAD'], { cwd: updateRoot })
+    const currentCommit = head.code === 0 ? head.stdout.trim() : null
+
+    const result = computePackageStaleness({
+      packagedCommit: INSTALL_STAMP.commit,
+      currentCommit
+    })
+
+    if (result.stale) {
+      rememberLog(
+        `[hermes] packaged app is stale: running ${result.packagedCommit?.slice(0, 12)}, ` +
+          `checkout HEAD is ${result.currentCommit?.slice(0, 12)}. Restart via \`hermes desktop\` to repackage.`
+      )
+    }
+
+    return result
+  } catch (err) {
+    rememberLog(`[hermes] package staleness check failed: ${err?.message || err}`)
+
+    return null
+  }
 }
 
 async function checkUpdates() {
@@ -10333,7 +10378,7 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   // kind+session can arrive here twice. Collapse it at this single choke point.
   // Return true (not false): a notification for the event IS being shown by the
   // first caller, so the settings "send test" success probe stays honest.
-  if (isDuplicateNotification(`${payload?.kind ?? ''}:${payload?.sessionId ?? payload?.tag ?? ''}`)) {
+  if (isDuplicateNotification(`${payload?.kind ?? ''}:${payload?.sessionId ?? ''}`)) {
     return true
   }
 
@@ -10508,22 +10553,6 @@ ipcMain.handle('hermes:writeClipboard', (_event, text) => {
   clipboard.writeText(String(text || ''))
 
   return true
-})
-
-// Native save-location picker (profile export etc.) — the write itself happens
-// elsewhere (the backend, for profile archives); this only picks the path.
-ipcMain.handle('hermes:selectSavePath', async (_event, options: any = {}) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: options?.title || 'Save',
-    defaultPath: options?.defaultPath ? String(options.defaultPath) : undefined,
-    filters: Array.isArray(options?.filters) ? options.filters : undefined
-  })
-
-  if (result.canceled || !result.filePath) {
-    return null
-  }
-
-  return result.filePath
 })
 
 // Paired reader for the GUI terminal's paste chord: the renderer's
@@ -11411,6 +11440,8 @@ ipcMain.handle('hermes:updates:check', async () =>
     fetchedAt: Date.now()
   }))
 )
+
+ipcMain.handle('hermes:package-staleness:get', async () => checkPackageStaleness().catch(() => null))
 
 ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
   applyUpdates(payload || {}).catch(error => ({

@@ -185,6 +185,11 @@ export const zh: Translations = {
     dismiss: '忽略'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `此应用打包时的版本（${packaged}）比当前检出（${current}）旧。请通过 \`hermes desktop\` 重新启动以重新打包并获取最新修复。`
+  },
+
   titlebar: {
     hideSidebar: '隐藏侧边栏',
     showSidebar: '显示侧边栏',
@@ -387,10 +392,6 @@ export const zh: Translations = {
         credits: {
           label: '额度提醒',
           description: '额度访问被暂停或恢复。'
-        },
-        plugin: {
-          label: '插件通知',
-          description: 'Hermes 在后台时，桌面插件发送了通知。'
         }
       },
       test: '发送测试通知',
@@ -1757,12 +1758,6 @@ export const zh: Translations = {
     search: '搜索配置档案…',
     loading: '正在加载配置档案…',
     newProfile: '新建配置档案',
-    importProfile: '导入配置档案…',
-    exportProfile: '导出配置档案…',
-    imported: '配置档案已导入',
-    exported: '配置档案已导出',
-    failedImport: '导入配置档案失败',
-    failedExport: '导出配置档案失败',
     allProfiles: '全部配置档案',
     showAllProfiles: '显示全部配置档案',
     switchToProfile: name => `切换到 ${name}`,
@@ -2076,11 +2071,6 @@ export const zh: Translations = {
       menuAddFolder: '添加文件夹',
       menuSetActive: '设为活动',
       menuDelete: '删除',
-      moveToProject: '移动到项目',
-      movedTo: name => `已移动到 ${name}`,
-      moveFailed: '无法移动会话',
-      moveNoFolder: '该项目没有可移入的文件夹',
-      moveNoProjects: '没有其他项目',
       reveal: '在文件夹中显示',
       copyPath: '复制路径',
       removeFromSidebar: '从侧边栏移除',
@@ -2886,8 +2876,7 @@ export const zh: Translations = {
     layoutNamePlaceholder: fallback => `布局名称（${fallback}）`,
     saveApply: '保存并应用',
     notExpressible: '此排列互相咬合（风车形）——暂无法表示为嵌套拆分',
-    zoneCount: count => `${count} 个区域`,
-    tabCount: count => `${count} 个标签页`
+    zoneCount: count => `${count} 个区域`
   },
 
   assistant: {
@@ -2957,7 +2946,8 @@ export const zh: Translations = {
       continueLabel: '继续',
       lateAnswer: (question, choice) => `关于"${question}" — 我的回答: ${choice}`,
       lateAnswerTip: '将此回答起草为后续消息',
-      lateAnswerHint: '此问题已不再等待回答。选择一个选项会将其起草为后续消息。'
+      lateAnswerHint: '此问题已不再等待回答。选择一个选项会将其起草为后续消息。',
+      expired: '已无法回答 — 该轮对话已在你回复前结束'
     },
     tool: {
       copyCode: '复制代码',

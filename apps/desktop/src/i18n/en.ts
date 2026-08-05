@@ -190,6 +190,11 @@ export const en: Translations = {
     dismiss: 'Dismiss'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `This app was packaged from an older build (${packaged}) than the checkout it runs from (${current}). Restart via \`hermes desktop\` to repackage and pick up the latest fixes.`
+  },
+
   titlebar: {
     hideSidebar: 'Hide sidebar',
     showSidebar: 'Show sidebar',
@@ -395,10 +400,6 @@ export const en: Translations = {
         credits: {
           label: 'Credit alerts',
           description: 'Credit access is paused or restored.'
-        },
-        plugin: {
-          label: 'Plugin notifications',
-          description: 'A desktop plugin sent a notification while Hermes was in the background.'
         }
       },
       test: 'Send test notification',
@@ -1563,12 +1564,6 @@ export const en: Translations = {
     search: 'Search profiles...',
     loading: 'Loading profiles...',
     newProfile: 'New profile',
-    importProfile: 'Import profile…',
-    exportProfile: 'Export profile…',
-    imported: 'Profile imported',
-    exported: 'Profile exported',
-    failedImport: 'Failed to import profile',
-    failedExport: 'Failed to export profile',
     allProfiles: 'All profiles',
     showAllProfiles: 'Show all profiles',
     switchToProfile: name => `Switch to ${name}`,
@@ -1882,11 +1877,6 @@ export const en: Translations = {
       menuAddFolder: 'Add folder',
       menuSetActive: 'Set active',
       menuDelete: 'Delete',
-      moveToProject: 'Move to project',
-      movedTo: name => `Moved to ${name}`,
-      moveFailed: 'Could not move session',
-      moveNoFolder: 'That project has no folder to move into',
-      moveNoProjects: 'No other projects',
       reveal: 'Reveal in folder',
       copyPath: 'Copy path',
       removeFromSidebar: 'Hide from sidebar',
@@ -2708,8 +2698,7 @@ export const en: Translations = {
     layoutNamePlaceholder: fallback => `Layout name (${fallback})`,
     saveApply: 'Save & apply',
     notExpressible: 'this arrangement interlocks (pinwheel) — not expressible as nested splits yet',
-    zoneCount: count => `${count} zones`,
-    tabCount: count => `${count} tabs`
+    zoneCount: count => `${count} zones`
   },
 
   assistant: {
@@ -2782,7 +2771,8 @@ export const en: Translations = {
       continueLabel: 'Continue',
       lateAnswer: (question, choice) => `Re: "${question}" — my answer: ${choice}`,
       lateAnswerTip: 'Draft this answer as a follow-up message',
-      lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.'
+      lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.',
+      expired: 'No longer answerable — the turn ended before you responded'
     },
     tool: {
       copyCode: 'Copy code',

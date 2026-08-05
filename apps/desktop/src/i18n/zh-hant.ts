@@ -185,6 +185,11 @@ export const zhHant = defineLocale({
     dismiss: '忽略'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `此應用程式打包時的版本（${packaged}）比目前的簽出（${current}）舊。請透過 \`hermes desktop\` 重新啟動以重新打包並取得最新修正。`
+  },
+
   titlebar: {
     hideSidebar: '隱藏側邊欄',
     showSidebar: '顯示側邊欄',
@@ -263,10 +268,6 @@ export const zhHant = defineLocale({
         credits: {
           label: '額度提醒',
           description: '額度存取被暫停或恢復。'
-        },
-        plugin: {
-          label: '外掛通知',
-          description: 'Hermes 在背景時，桌面外掛傳送了通知。'
         }
       },
       test: '傳送測試通知',
@@ -1349,12 +1350,6 @@ export const zhHant = defineLocale({
     search: '搜尋設定檔…',
     loading: '正在載入設定檔…',
     newProfile: '新增設定檔',
-    importProfile: '匯入設定檔…',
-    exportProfile: '匯出設定檔…',
-    imported: '設定檔已匯入',
-    exported: '設定檔已匯出',
-    failedImport: '匯入設定檔失敗',
-    failedExport: '匯出設定檔失敗',
     allProfiles: '全部設定檔',
     showAllProfiles: '顯示全部設定檔',
     switchToProfile: name => `切換至 ${name}`,
@@ -2449,8 +2444,7 @@ export const zhHant = defineLocale({
     layoutNamePlaceholder: fallback => `版面名稱（${fallback}）`,
     saveApply: '儲存並套用',
     notExpressible: '此排列互相咬合（風車形）——暫時無法表示為巢狀分割',
-    zoneCount: count => `${count} 個區域`,
-    tabCount: count => `${count} 個分頁`
+    zoneCount: count => `${count} 個區域`
   },
 
   assistant: {
@@ -2518,7 +2512,8 @@ export const zhHant = defineLocale({
       continueLabel: '繼續',
       lateAnswer: (question, choice) => `關於「${question}」 — 我的回答: ${choice}`,
       lateAnswerTip: '將此回答起草為後續訊息',
-      lateAnswerHint: '此問題已不再等待回答。選擇一個選項會將其起草為後續訊息。'
+      lateAnswerHint: '此問題已不再等待回答。選擇一個選項會將其起草為後續訊息。',
+      expired: '已無法回答 — 該輪對話已在您回覆前結束'
     },
     tool: {
       copyCode: '複製程式碼',
