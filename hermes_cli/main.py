@@ -8480,6 +8480,18 @@ def _install_python_dependencies_with_optional_fallback(
             _install(["install", "-e", f".[{extra}]"])
             installed_extras.append(extra)
         except subprocess.CalledProcessError:
+            # Known-failure auto-remediation: some extras pull native deps
+            # whose upstream source has a build bug on newer toolchains.
+            # Try a targeted, pre-vetted fix once, then retry the extra
+            # before giving up on it.
+            if _remediate_known_extra_build_failure(extra, install_cmd_prefix, env=env):
+                try:
+                    _install(["install", "-e", f".[{extra}]"])
+                    installed_extras.append(extra)
+                    print(f"  ✓ Recovered optional extra after auto-patch: {extra}")
+                    continue
+                except subprocess.CalledProcessError:
+                    pass
             failed_extras.append(extra)
 
     if installed_extras:
@@ -8503,6 +8515,156 @@ def _install_python_dependencies_with_optional_fallback(
     # downstream.
     _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
+
+
+def _remediate_known_extra_build_failure(
+    extra: str,
+    install_cmd_prefix: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Auto-patch known upstream native-build bugs before retrying an extra.
+
+    Some optional extras vendor a native C/C++ dependency whose upstream
+    *sdist* has a real build bug on newer toolchains (not an env misconfig on
+    our side). ``pip``/``uv`` re-download and rebuild that sdist from scratch
+    on every install, so the failure recurs on every fresh venv / every
+    ``hermes update`` until upstream ships a fix. Rather than let users hit
+    the same cryptic native-build traceback repeatedly, we vet a minimal
+    source patch once, cache the built wheel, and reuse it.
+
+    Currently handles:
+      * ``matrix`` -> ``python-olm`` bundles ``libolm`` C++ sources with a
+        const-correctness bug in ``include/olm/list.hh`` (``T* const
+        other_pos`` mutated via ``++other_pos``) that newer Apple clang /
+        recent GCC reject as a hard compile error. We patch the header,
+        build ``libolm`` + a ``python-olm`` wheel against the *exact* target
+        venv's interpreter (ABI/version must match), cache it under
+        ``~/.hermes/cache/wheels/``, and pip-install the wheel directly so
+        pip never attempts (and fails) to rebuild python-olm from source.
+
+    Returns True if a remediation was attempted (caller should retry the
+    extra install), False if this extra/failure isn't one we know how to fix.
+    """
+    if extra != "matrix":
+        return False
+
+    try:
+        return _patch_and_install_python_olm_wheel(install_cmd_prefix, env=env)
+    except Exception as e:
+        logger.debug("matrix extra auto-remediation failed: %s", e)
+        print(f"  ⚠ Auto-patch for '{extra}' extra failed: {e}")
+        return False
+
+
+def _patch_and_install_python_olm_wheel(
+    install_cmd_prefix: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Build + install a patched ``python-olm`` wheel for the target venv.
+
+    Cached per (python-olm version, interpreter tag) under
+    ``~/.hermes/cache/wheels/`` so repeat updates on the same machine skip
+    straight to ``pip install <cached wheel>`` instead of rebuilding libolm.
+    """
+    import re
+    import sysconfig
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    from hermes_cli.config import get_hermes_home
+
+    OLM_VERSION = "3.2.16"
+    OLM_SDIST_URL = (
+        "https://files.pythonhosted.org/packages/b8/eb/"
+        "23ca73cbdc8c7466a774e515dfd917d9fbe747c1257059246fdc63093f04/"
+        f"python-olm-{OLM_VERSION}.tar.gz"
+    )
+    # Const-correctness bug: `other_pos` is declared `T * const` (pointer
+    # itself is const, whitespace around '*' varies) but the loop body does
+    # `++other_pos`, mutating a const pointer. Legal under older/looser
+    # compilers, a hard error under newer clang/GCC with stricter
+    # const-checking. Match loosely on whitespace since upstream formatting
+    # may shift between releases.
+    BAD_PATTERN = re.compile(r"T\s*\*\s*const\s+other_pos")
+    GOOD_SNIPPET = "T* other_pos"
+
+    # Resolve the venv's actual python executable so the wheel ABI matches
+    # exactly (cp311-cp311-macosx_11_0_arm64 etc). install_cmd_prefix is
+    # either [uv_bin, "pip"] or [sys.executable, "-m", "pip"]; either way
+    # sys.executable inside this process IS the target venv's interpreter
+    # because hermes_cli.main always runs from within that venv.
+    target_python = sys.executable
+
+    tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    cache_dir = get_hermes_home() / "cache" / "wheels"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_wheel = cache_dir / f"python_olm-{OLM_VERSION}-{py_tag}-{py_tag}-{tag}.whl"
+
+    if not cached_wheel.exists():
+        print(f"  → Building patched python-olm wheel for {py_tag}-{tag} (one-time)...")
+        with tempfile.TemporaryDirectory(prefix="olm-build-") as tmp:
+            tmp_path = Path(tmp)
+            sdist_path = tmp_path / f"python-olm-{OLM_VERSION}.tar.gz"
+            urllib.request.urlretrieve(OLM_SDIST_URL, sdist_path)
+            with tarfile.open(sdist_path) as tf:
+                tf.extractall(tmp_path)
+            src_dir = tmp_path / f"python-olm-{OLM_VERSION}"
+            list_hh = src_dir / "libolm" / "include" / "olm" / "list.hh"
+            if not list_hh.is_file():
+                raise RuntimeError(f"expected header not found: {list_hh}")
+            text = list_hh.read_text()
+            if not BAD_PATTERN.search(text):
+                # Upstream may have already fixed it, or bundled source
+                # layout changed — nothing to patch, let pip try normally.
+                logger.debug("list.hh const-correctness bug not present; skipping patch")
+                return False
+            list_hh.write_text(BAD_PATTERN.sub(GOOD_SNIPPET, text))
+
+            make_cmd = ["make", "static"]
+            subprocess.run(make_cmd, cwd=src_dir / "libolm", check=True, capture_output=True)
+
+            # Pin cffi first — python-olm's build_ext step imports cffi at
+            # build time and a version-skewed cffi/_cffi_backend can produce
+            # confusing unrelated errors before the compiler ever runs.
+            # Use the same installer (uv pip / pip) the caller already
+            # resolved, so we don't assume a bare `pip` module is importable
+            # inside a uv-managed venv (it usually isn't).
+            subprocess.run(
+                install_cmd_prefix + ["install", "-q", "cffi==2.1.0"],
+                check=True,
+                env=env,
+            )
+            build_result = subprocess.run(
+                (
+                    [install_cmd_prefix[0], "build", "--wheel", "-o", str(tmp_path / "dist")]
+                    if Path(install_cmd_prefix[0]).name.startswith("uv")
+                    else [target_python, "-m", "pip", "wheel", ".", "-w", str(tmp_path / "dist"), "--no-deps"]
+                ),
+                cwd=src_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if build_result.returncode != 0:
+                raise RuntimeError(
+                    f"wheel build failed:\n{build_result.stdout[-2000:]}\n{build_result.stderr[-2000:]}"
+                )
+            built = list((tmp_path / "dist").glob("python_olm-*.whl"))
+            if not built:
+                raise RuntimeError("wheel build produced no output")
+            built[0].replace(cached_wheel)
+
+    print(f"  → Installing patched python-olm wheel: {cached_wheel.name}")
+    subprocess.run(
+        install_cmd_prefix + ["install", "-q", str(cached_wheel)],
+        check=True,
+        env=env,
+    )
+    return True
 
 
 def _load_console_script_names() -> list[str]:
