@@ -76,9 +76,13 @@ export function clearSessionTodos(sid: string) {
 
 // Drop a still-active todo list (any pending/in_progress item) — used at turn
 // end, when an unfinished list means the turn stopped without a final `todo`
-// update, so the "Tasks N/M" panel would otherwise stay pinned above the
-// composer forever. A finished list is left untouched so its short linger
-// still shows the last checkmark landing.
+// update. Previously this hard-deleted the list instantly, which made real
+// progress (e.g. 3/6 items done, turn just ended without a final write)
+// disappear with zero warning — indistinguishable from a bug to the user.
+// Now it gets the SAME short linger a finished list gets: visible long enough
+// to register the last state, then gone — so "Tasks N/M" still can't get
+// stuck pinned forever (the original problem), but a normal turn ending
+// doesn't look like the panel randomly vanished.
 export function clearActiveSessionTodos(sid: string) {
   const todos = $todosBySession.get()[sid]
 
@@ -86,5 +90,12 @@ export function clearActiveSessionTodos(sid: string) {
     return
   }
 
-  clearSessionTodos(sid)
+  cancelScheduledClear(sid)
+  clearTimers.set(
+    sid,
+    setTimeout(() => {
+      clearTimers.delete(sid)
+      clearSessionTodos(sid)
+    }, FINISHED_LINGER_MS)
+  )
 }
