@@ -9,6 +9,7 @@ import contextvars
 import json
 import logging
 import os
+import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -634,10 +635,19 @@ class HermesACPAgent(acp.Agent):
         value: key for key, value in _MODE_TO_EDIT_APPROVAL_POLICY.items()
     }
 
-    def __init__(self, session_manager: SessionManager | None = None):
+    def __init__(
+        self,
+        session_manager: SessionManager | None = None,
+        mcp_discovery_done: threading.Event | None = None,
+    ):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
+        # Set once startup MCP discovery (kicked off on a background thread
+        # by acp_adapter.entry) finishes. None means no discovery was
+        # started for this agent (e.g. direct instantiation in a test) --
+        # treated as "already ready" so callers don't hang.
+        self._mcp_discovery_done = mcp_discovery_done
 
     # ---- Connection lifecycle -----------------------------------------------
 
@@ -1651,6 +1661,14 @@ class HermesACPAgent(acp.Agent):
         )
         if not has_content:
             return PromptResponse(stop_reason="end_turn")
+
+        # Startup MCP discovery (config.yaml servers) runs on a background
+        # thread so it doesn't block the ACP handshake -- see
+        # acp_adapter.entry. Block here, off the event loop, so the first
+        # turn never runs (and no tool list is ever built) before that
+        # discovery has actually finished registering mcp__* tools.
+        if self._mcp_discovery_done is not None and not self._mcp_discovery_done.is_set():
+            await asyncio.to_thread(self._mcp_discovery_done.wait)
 
         # /steer on an idle session has no in-flight tool call to inject into.
         # Rewrite it so the payload runs as a normal user prompt, matching the

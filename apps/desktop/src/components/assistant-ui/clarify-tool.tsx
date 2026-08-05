@@ -15,7 +15,6 @@ import {
 
 import { requestComposerFocus, requestComposerInsert } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
-import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { WIDGET_SHELL_CLASS } from '@/components/chat/widget-shell'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -200,12 +199,57 @@ export const ClarifyTool = (props: ToolCallMessagePartProps) => {
 function ClarifyToolLive(props: ToolCallMessagePartProps) {
   const messageRunning = useAuiState(selectMessageRunning)
 
-  // Stopped mid-prompt with no result — don't leave a dead interactive panel.
+  // Stopped mid-prompt with no result — the turn ended (app/gateway restart,
+  // interrupt, crash) while this clarify was still outstanding on the
+  // backend. Falling through to the generic ToolFallback here used to drop
+  // the question and choices entirely, collapsing to a bare "Asked a
+  // question" label with no way to see what was actually asked. Render the
+  // same read-only shape as a settled clarify (minus buttons — there's
+  // nothing live to answer into) so the content survives a restart.
   if (!messageRunning) {
-    return <ToolFallback {...props} />
+    return <ClarifyToolExpired {...props} />
   }
 
   return <ClarifyToolPending {...props} />
+}
+
+function ClarifyToolExpired({ args }: ToolCallMessagePartProps) {
+  const { t } = useI18n()
+  const copy = t.assistant.clarify
+  const fromArgs = useMemo(() => readClarifyArgs(args), [args])
+  const choices = fromArgs.choices ?? []
+  const hasChoices = choices.length > 0
+
+  return (
+    <ClarifyShell className="grid gap-1.5 px-2.5 py-2" data-clarify-expired="">
+      {fromArgs.question ? (
+        <ClarifyLine icon={MessageQuestion}>
+          <span className="whitespace-pre-wrap font-medium leading-(--conversation-line-height)">
+            {fromArgs.question}
+          </span>
+        </ClarifyLine>
+      ) : null}
+      {hasChoices ? (
+        <div className="grid gap-px" data-clarify-choices="" role="group">
+          {choices.map((choice, index) => (
+            <div
+              className={cn(OPTION_ROW_CLASS, 'text-(--ui-text-tertiary)')}
+              data-choice
+              key={`${index}-${choice}`}
+            >
+              <KeyBadge char={letterFor(index)} selected={false} />
+              <span className="flex-1 wrap-anywhere">{choice}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <ClarifyLine icon={CircleLetterA}>
+        <p className="whitespace-pre-wrap italic leading-(--conversation-line-height) text-(--ui-text-tertiary)">
+          {copy.expired}
+        </p>
+      </ClarifyLine>
+    </ClarifyShell>
+  )
 }
 
 function ClarifyToolSettled({ args, result }: ToolCallMessagePartProps) {
@@ -219,7 +263,18 @@ function ClarifyToolSettled({ args, result }: ToolCallMessagePartProps) {
   const error = fromResult.error
   const skipped = !error && answer !== undefined && !answer.trim()
   const answerText = error || (skipped ? copy.skipped : (answer ?? '').trim())
+  // The offered choices were parsed out of the tool call's arguments but never
+  // surfaced here — reopening a past session showed only the question + the
+  // final answer, never the options that had actually been on offer. Render
+  // them alongside the answer so a settled clarify reads the same shape as a
+  // live one, with the picked option (if any) visually marked.
   const choices = fromArgs.choices ?? []
+  const hasChoices = choices.length > 0
+  const trimmedAnswer = (answer ?? '').trim()
+  const pickedChoice = hasChoices ? (choices.find(choice => choice === trimmedAnswer) ?? null) : null
+  // A freeform answer that doesn't match any offered choice is still worth
+  // labeling distinctly (it came from the "Other" field, not a pick).
+  const freeformAnswer = hasChoices && !error && !skipped && !pickedChoice ? answerText : ''
 
   // A skipped (timed-out) clarify keeps its choices on screen and actionable.
   // The blocking request is long gone — the tool already returned empty — so a
@@ -243,7 +298,33 @@ function ClarifyToolSettled({ args, result }: ToolCallMessagePartProps) {
           <span className="whitespace-pre-wrap font-medium leading-(--conversation-line-height)">{question}</span>
         </ClarifyLine>
       ) : null}
-      {answerText ? (
+      {/*
+        Static, non-interactive recap of the options for a clarify that was
+        actually ANSWERED. The skipped case is deliberately excluded: it renders
+        the interactive `data-clarify-late-choices` group further down instead,
+        and without this guard a skipped-with-choices card listed every option
+        twice (once dead, once clickable).
+      */}
+      {hasChoices && !skipped ? (
+        <div className="grid gap-px" data-clarify-choices="" role="group">
+          {choices.map((choice, index) => (
+            <div
+              className={cn(
+                OPTION_ROW_CLASS,
+                'disabled:opacity-100',
+                choice === pickedChoice ? 'text-(--ui-text-primary)' : 'text-(--ui-text-tertiary)'
+              )}
+              data-choice
+              data-picked={choice === pickedChoice ? '' : undefined}
+              key={`${index}-${choice}`}
+            >
+              <KeyBadge char={letterFor(index)} selected={choice === pickedChoice} />
+              <span className="flex-1 wrap-anywhere">{choice}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {answerText && (!hasChoices || freeformAnswer || error || skipped) ? (
         <ClarifyLine icon={CircleLetterA}>
           <p
             className={cn(

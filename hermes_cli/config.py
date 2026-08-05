@@ -2786,7 +2786,8 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         model_in.get("model") or model_in.get("name")
     )
     has_root = any(
-        config.get(k) for k in ("provider", "base_url", "context_length", "api_base")
+        config.get(k)
+        for k in ("provider", "base_url", "context_length", "max_tokens", "api_base")
     )
     if not has_root and not model_has_alias and not model_needs_canon:
         return config
@@ -2799,7 +2800,7 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         model = dict(model)
     config["model"] = model
 
-    for key in ("provider", "base_url", "context_length"):
+    for key in ("provider", "base_url", "context_length", "max_tokens"):
         root_val = config.get(key)
         if root_val and not model.get(key):
             model[key] = root_val

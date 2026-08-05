@@ -127,6 +127,88 @@ def _export_port_health_grace_timeout(config: dict[str, Any]) -> None:
     os.environ.setdefault(_PORT_HEALTH_GRACE_ENV, repr(seconds))
 
 
+_LOCAL_RUNTIME_CACHE_FILENAME = ".local_runtime_check.json"
+# A positive verdict is pinned to the version fingerprint and never expires —
+# the NumPy/CPU compatibility it records can't change without a package
+# upgrade, which already busts the key. A negative verdict gets a short TTL
+# instead: the import can also fail for transient reasons (OOM, a wedged
+# disk, momentary resource contention under load) that have nothing to do
+# with genuine incompatibility, and upstream previously retried on every
+# launch, so a blip always self-healed. Caching a transient failure forever
+# would regress that — silently and permanently disabling local memory until
+# someone manually deletes a cache file they don't know exists.
+_LOCAL_RUNTIME_NEGATIVE_TTL_SECONDS = 300
+
+
+def _local_runtime_cache_key() -> str:
+    """Fingerprint that invalidates the cached local-runtime verdict.
+
+    The NumPy/CPU compatibility this check guards against is a property of
+    the installed packages and the machine, not of any single process — so
+    the verdict only needs to change when ``hindsight``/``numpy`` (or the
+    Python interpreter) are upgraded.
+    """
+    try:
+        from importlib.metadata import distributions, version as _pkg_version
+    except ImportError:  # pragma: no cover - py<3.8, unsupported here anyway
+        return "unknown"
+    # The importable ``hindsight`` / ``hindsight_embed`` modules are split
+    # across several distributions (hindsight-all, hindsight-embed,
+    # hindsight-api-slim, hindsight-client, ...) rather than a single
+    # "hindsight" package, so pin every installed hindsight-* distribution
+    # rather than guessing one name — an upgrade to any of them must bust
+    # the cache.
+    try:
+        hindsight_versions = sorted(
+            f"{d.metadata.get('Name', '')}={d.version}"
+            for d in distributions()
+            if str(d.metadata.get("Name", "")).lower().startswith("hindsight")
+        )
+    except Exception:
+        hindsight_versions = ["?"]
+    try:
+        numpy_version = _pkg_version("numpy")
+    except Exception:
+        numpy_version = "?"
+    return f"py={sys.version_info[:3]}|{','.join(hindsight_versions)}|numpy={numpy_version}"
+
+
+def _local_runtime_cache_path():
+    from pathlib import Path
+    return Path(get_hermes_home()) / "hindsight" / _LOCAL_RUNTIME_CACHE_FILENAME
+
+
+def _read_local_runtime_cache(cache_key: str) -> tuple[bool, str | None] | None:
+    path = _local_runtime_cache_path()
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if cached.get("key") != cache_key:
+        return None
+    available = bool(cached.get("available"))
+    if not available:
+        checked_at = cached.get("checked_at")
+        if not isinstance(checked_at, (int, float)):
+            # Cache written before checked_at existed, or corrupt — treat as
+            # expired rather than trusting an unaged negative forever.
+            return None
+        if time.time() - checked_at >= _LOCAL_RUNTIME_NEGATIVE_TTL_SECONDS:
+            return None
+    return available, cached.get("error")
+
+
+def _write_local_runtime_cache(cache_key: str, available: bool, error: str | None) -> None:
+    try:
+        from utils import atomic_json_write
+        atomic_json_write(
+            _local_runtime_cache_path(),
+            {"key": cache_key, "available": available, "error": error, "checked_at": time.time()},
+        )
+    except Exception:
+        logger.debug("Could not persist Hindsight local-runtime check cache", exc_info=True)
+
+
 def _check_local_runtime() -> tuple[bool, str | None]:
     """Return whether local embedded Hindsight imports cleanly.
 
@@ -142,13 +224,30 @@ def _check_local_runtime() -> tuple[bool, str | None]:
     healthy and ``hermes memory status`` would stay green while the daemon
     aborts at startup on every retain/recall. Import it too so the probe (and
     status) reports the real ImportError.
+
+    That full import pulls in hindsight_api's provider stack (litellm,
+    google-genai, ~2800 pydantic model schemas) and costs several seconds on
+    every process launch — a one-time-per-environment cost being re-paid on
+    every ``AIAgent`` construction. Cache the verdict on disk, keyed by the
+    hindsight/numpy/python versions that produced it, so repeat checks on an
+    unchanged environment skip the import. A package/interpreter upgrade
+    changes the cache key and forces a fresh check.
     """
+    cache_key = _local_runtime_cache_key()
+    cached = _read_local_runtime_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         importlib.import_module("hindsight")
         importlib.import_module("hindsight_embed.daemon_embed_manager")
+        # Must run BEFORE caching a healthy verdict: this is the import that
+        # actually catches a broken embedding stack, and caching "available"
+        # ahead of it would persist a false green for the whole environment.
         importlib.import_module("sentence_transformers")
+        _write_local_runtime_cache(cache_key, True, None)
         return True, None
     except Exception as exc:
+        _write_local_runtime_cache(cache_key, False, str(exc))
         return False, str(exc)
 
 

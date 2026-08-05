@@ -232,6 +232,10 @@ export interface Translations {
     dismiss: string
   }
 
+  packageStalenessBanner: {
+    message: (packaged: string, current: string) => string
+  }
+
   titlebar: {
     hideSidebar: string
     showSidebar: string
@@ -2361,6 +2365,7 @@ export interface Translations {
       lateAnswer: (question: string, choice: string) => string
       lateAnswerTip: string
       lateAnswerHint: string
+      expired: string
     }
     tool: {
       copyCode: string

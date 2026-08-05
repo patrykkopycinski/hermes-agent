@@ -60,20 +60,31 @@ describe('useMessageStream turn-end todo cleanup', () => {
   afterEach(() => {
     cleanup()
     clearSessionTodos(SID)
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
-  it('drops a still-active task list when the turn completes', async () => {
+  it('lingers a still-active task list on turn completion, then drops it', async () => {
     await mountStream()
+    // Fake timers only AFTER mounting — mountStream's waitFor() depends on
+    // real timers to resolve; enabling fake timers before it would hang.
+    vi.useFakeTimers()
     setSessionTodos(SID, [todo('a', 'completed'), todo('b', 'in_progress')])
 
     complete()
+
+    // Still visible right after the turn ends (same linger a finished list
+    // gets) — not an instant wipe that reads as a bug to the user.
+    expect($todosBySession.get()[SID]).toHaveLength(2)
+
+    vi.advanceTimersByTime(4_000)
 
     expect($todosBySession.get()[SID]).toBeUndefined()
   })
 
   it('keeps a finished list on completion so its linger shows the final checkmarks', async () => {
     await mountStream()
+    vi.useFakeTimers()
     setSessionTodos(SID, [todo('a', 'completed')])
 
     complete()
@@ -82,11 +93,16 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect($todosBySession.get()[SID]).toHaveLength(1)
   })
 
-  it('drops a still-active task list when the turn errors out', async () => {
+  it('lingers a still-active task list when the turn errors out, then drops it', async () => {
     await mountStream()
+    vi.useFakeTimers()
     setSessionTodos(SID, [todo('a', 'in_progress')])
 
     act(() => handleEvent!({ payload: { message: 'boom' }, session_id: SID, type: 'error' }))
+
+    expect($todosBySession.get()[SID]).toHaveLength(1)
+
+    vi.advanceTimersByTime(4_000)
 
     expect($todosBySession.get()[SID]).toBeUndefined()
   })

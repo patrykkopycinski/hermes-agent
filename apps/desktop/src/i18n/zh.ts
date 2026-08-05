@@ -185,6 +185,11 @@ export const zh: Translations = {
     dismiss: '忽略'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `此应用打包时的版本（${packaged}）比当前检出（${current}）旧。请通过 \`hermes desktop\` 重新启动以重新打包并获取最新修复。`
+  },
+
   titlebar: {
     hideSidebar: '隐藏侧边栏',
     showSidebar: '显示侧边栏',
@@ -2941,7 +2946,8 @@ export const zh: Translations = {
       continueLabel: '继续',
       lateAnswer: (question, choice) => `关于"${question}" — 我的回答: ${choice}`,
       lateAnswerTip: '将此回答起草为后续消息',
-      lateAnswerHint: '此问题已不再等待回答。选择一个选项会将其起草为后续消息。'
+      lateAnswerHint: '此问题已不再等待回答。选择一个选项会将其起草为后续消息。',
+      expired: '已无法回答 — 该轮对话已在你回复前结束'
     },
     tool: {
       copyCode: '复制代码',

@@ -191,6 +191,11 @@ export const ja = defineLocale({
     dismiss: '閉じる'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `このアプリは現在のチェックアウト（${current}）より古いビルド（${packaged}）からパッケージ化されています。最新の修正を反映するには \`hermes desktop\` で再起動してパッケージを作り直してください。`
+  },
+
   titlebar: {
     hideSidebar: 'サイドバーを非表示',
     showSidebar: 'サイドバーを表示',
@@ -2589,7 +2594,8 @@ export const ja = defineLocale({
       continueLabel: '続行',
       lateAnswer: (question, choice) => `「${question}」について — 私の回答: ${choice}`,
       lateAnswerTip: 'この回答をフォローアップメッセージとして下書きします',
-      lateAnswerHint: 'この質問はもう回答を待っていません。選択肢を選ぶとフォローアップメッセージとして下書きされます。'
+      lateAnswerHint: 'この質問はもう回答を待っていません。選択肢を選ぶとフォローアップメッセージとして下書きされます。',
+      expired: '回答できません — 応答する前にターンが終了しました'
     },
     tool: {
       copyCode: 'コードをコピー',

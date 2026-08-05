@@ -11,10 +11,37 @@ import { $activeSessionId } from '@/store/session'
 
 import { ClarifyTool, readClarifyResult } from './clarify-tool'
 
+// DOM APIs assistant-ui's viewport (use-stick-to-bottom) relies on but
+// jsdom doesn't implement — see approval-group.test.tsx for the same stubs.
+class TestResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+vi.stubGlobal('ResizeObserver', TestResizeObserver)
+vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+  window.setTimeout(() => callback(performance.now()), 0)
+)
+vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
+
+Element.prototype.scrollTo = function scrollTo() {}
+
+Element.prototype.animate = function animate() {
+  return {
+    cancel: () => {},
+    finished: Promise.resolve()
+  } as unknown as Animation
+}
+
 // The live pending card only renders while its message is running. Force that so
 // keyboard-navigation tests can exercise ClarifyToolPending directly.
+// `messageRunning` is mutable so the expired-view test can flip it to false and
+// exercise ClarifyToolExpired without standing up a whole Thread runtime.
+const auiState = { messageRunning: true }
+
 vi.mock('@assistant-ui/react', () => ({
-  useAuiState: () => true
+  useAuiState: () => auiState.messageRunning
 }))
 
 afterEach(() => {
@@ -22,6 +49,7 @@ afterEach(() => {
   clearClarifyRequest()
   $activeSessionId.set(null)
   $gateway.set(null)
+  auiState.messageRunning = true
   vi.clearAllMocks()
 })
 
@@ -145,7 +173,48 @@ describe('ClarifyTool settled view', () => {
     expect(screen.getByText('Which deployment target?')).toBeTruthy()
     expect(screen.getByText('staging')).toBeTruthy()
     expect(document.querySelector('[data-clarify-settled]')).toBeTruthy()
-    expect(document.querySelector('[data-clarify-answer]')?.textContent).toBe('staging')
+  })
+
+  it('renders every offered choice, marking the one the user picked', () => {
+    renderClarify(
+      <ClarifyTool
+        {...settledClarifyProps(
+          { question: 'Which deployment target?', choices: ['staging', 'prod'] },
+          {
+            question: 'Which deployment target?',
+            choices_offered: ['staging', 'prod'],
+            user_response: 'staging'
+          },
+          'clarify-3'
+        )}
+      />
+    )
+
+    const choiceRows = document.querySelectorAll('[data-choice]')
+    expect(choiceRows).toHaveLength(2)
+    expect(screen.getByText('staging')).toBeTruthy()
+    expect(screen.getByText('prod')).toBeTruthy()
+    expect(document.querySelector('[data-choice][data-picked]')?.textContent).toContain('staging')
+  })
+
+  it('shows the freeform answer separately when it does not match any offered choice', () => {
+    renderClarify(
+      <ClarifyTool
+        {...settledClarifyProps(
+          { question: 'Which deployment target?', choices: ['staging', 'prod'] },
+          {
+            question: 'Which deployment target?',
+            choices_offered: ['staging', 'prod'],
+            user_response: 'canary'
+          },
+          'clarify-4'
+        )}
+      />
+    )
+
+    expect(document.querySelectorAll('[data-choice]')).toHaveLength(2)
+    expect(document.querySelector('[data-choice][data-picked]')).toBeNull()
+    expect(document.querySelector('[data-clarify-answer]')?.textContent).toBe('canary')
   })
 
   it('labels an empty response as Skipped', () => {
@@ -339,5 +408,50 @@ describe('ClarifyTool pending marker', () => {
 
     // No shortcuts → nothing to protect → composer type-to-focus stays live.
     expect(document.querySelector('[data-clarify-choices]')).toBeNull()
+  })
+})
+
+// Regression coverage for the "reopened session shows only 'Asked a question'
+// with no detail" bug. A clarify tool-call with no result, on a message whose
+// *thread* is no longer running (app/gateway restarted, session reopened from
+// history, or the turn was otherwise interrupted before an answer arrived),
+// used to fall through to the generic ToolFallback — which has no
+// clarify-specific view and collapsed straight to the bare "Asked a question"
+// label, dropping the question text and every offered choice. It must now
+// render the question + choices read-only instead.
+describe('ClarifyTool expired view (message stopped with no result)', () => {
+  // The expired view is selected purely by `messageRunning === false` with an
+  // undefined result — see ClarifyToolLive. Drive that directly rather than
+  // standing up a full Thread runtime: the earlier harness rendered <Thread />
+  // just to obtain the flag, which coupled this clarify test to the thread
+  // list's internal message-signature format and broke when that was rewritten.
+  function expiredClarifyProps(): ToolCallMessagePartProps {
+    const args = { choices: ['staging', 'prod'], question: 'Which target?' }
+
+    return {
+      addResult: vi.fn(),
+      args,
+      argsText: JSON.stringify(args),
+      isError: false,
+      respondToApproval: vi.fn(),
+      result: undefined,
+      resume: vi.fn(),
+      status: { type: 'complete' },
+      toolCallId: 'clarify-expired-1',
+      toolName: 'clarify',
+      type: 'tool-call'
+    }
+  }
+
+  it('renders the question and offered choices instead of collapsing to a bare label', () => {
+    auiState.messageRunning = false
+
+    renderClarify(<ClarifyTool {...expiredClarifyProps()} />)
+
+    expect(screen.getByText('Which target?')).toBeTruthy()
+    expect(screen.getByText('staging')).toBeTruthy()
+    expect(screen.getByText('prod')).toBeTruthy()
+    expect(document.querySelector('[data-clarify-expired]')).toBeTruthy()
+    expect(document.querySelectorAll('[data-clarify-expired] [data-choice]')).toHaveLength(2)
   })
 })
