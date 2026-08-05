@@ -190,6 +190,11 @@ export const en: Translations = {
     dismiss: 'Dismiss'
   },
 
+  packageStalenessBanner: {
+    message: (packaged, current) =>
+      `This app was packaged from an older build (${packaged}) than the checkout it runs from (${current}). Restart via \`hermes desktop\` to repackage and pick up the latest fixes.`
+  },
+
   titlebar: {
     hideSidebar: 'Hide sidebar',
     showSidebar: 'Show sidebar',
@@ -2782,7 +2787,8 @@ export const en: Translations = {
       continueLabel: 'Continue',
       lateAnswer: (question, choice) => `Re: "${question}" — my answer: ${choice}`,
       lateAnswerTip: 'Draft this answer as a follow-up message',
-      lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.'
+      lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.',
+      expired: 'No longer answerable — the turn ended before you responded'
     },
     tool: {
       copyCode: 'Copy code',
