@@ -69,6 +69,7 @@ copilot = CopilotProfile(
     env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
     base_url="https://api.githubcopilot.com",
     auth_type="copilot",
+    supports_vision=True,  # Routes to Claude/GPT which accept multimodal tool results
 )
 
 register_provider(copilot)
