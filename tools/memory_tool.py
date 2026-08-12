@@ -66,6 +66,51 @@ MEMORY_BLOCK_HEADERS = {
 
 ENTRY_DELIMITER = "\n§\n"
 
+# Per-entry cap, as a fraction of the store's own limit. The store-wide cap is a
+# *total*, which cannot distinguish a store legitimately full of one-line pointers
+# from one bloated by a few fat bodies — so sprawl stays invisible until the store
+# hits 100% and every agent's writes fail at once. This makes the rule structural at
+# write time instead of aspirational.
+#
+# Expressed as a ratio, not a constant: a single entry consuming more than this share
+# of the whole budget is a body, not a trigger, whatever the configured limit is. At
+# the default 7500 limit this lands near 200 chars.
+MAX_ENTRY_RATIO = 0.027
+# Below this total limit the cap is not enforced at all. A tiny store (embedded use,
+# unit-test fixtures) cannot meaningfully separate "trigger" from "body" — a single
+# entry legitimately occupies most of it — and enforcing there would break callers
+# that deliberately fill a small budget.
+MIN_LIMIT_FOR_CAP = 2000
+# Floor so the ratio never produces an absurdly small cap. Keep it BELOW the ratio's
+# value at real limits, or it silently swallows the ratio and every store gets the
+# same flat cap (measured: a 500 floor made limit=2200..7500 all cap at 500).
+MIN_ENTRY_CHARS = 120
+
+# Substrings that mark an entry as a pointer into a cold store. Pointer entries are
+# exempt: they are already the desired shape, and some need room for the trigger
+# phrase plus the path.
+_POINTER_MARKERS = (
+    "knowledge/",
+    "skill `",
+    ".md",
+    "RESEARCH/",
+    "ref ",
+    "→ mem/",
+    "-> mem/",
+)
+
+
+def _max_entry_chars(limit: int) -> Optional[int]:
+    """Largest non-pointer entry allowed, or None when the cap does not apply."""
+    if limit < MIN_LIMIT_FOR_CAP:
+        return None
+    return max(MIN_ENTRY_CHARS, int(limit * MAX_ENTRY_RATIO))
+
+
+def _has_pointer(content: str) -> bool:
+    """True when the entry points at a cold store rather than inlining a body."""
+    return any(marker in content for marker in _POINTER_MARKERS)
+
 
 # ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
@@ -439,6 +484,36 @@ class MemoryStore:
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
                 })
+
+            # Per-entry cap. Checked AFTER the total check so a genuinely full store
+            # still reports overflow first — that is the more urgent signal, and it
+            # keeps the consolidation contract intact.
+            #
+            # Why this exists: the total-only cap cannot distinguish a store full of
+            # one-line pointers from one bloated by a few fat bodies, so sprawl stays
+            # invisible until 100%, when every agent's writes fail at once (measured:
+            # 6+ hand-triage passes, each reported fixed, because trimming resets the
+            # number and leaves the generator intact). Memory is re-injected every
+            # turn, so a fat entry is also a permanent per-turn token tax.
+            max_entry = _max_entry_chars(limit)
+            if max_entry is not None and len(content) > max_entry and not _has_pointer(content):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Entry is {len(content)} chars, over the {max_entry}-char "
+                        f"per-entry cap, and has no pointer to a cold store. Memory is "
+                        f"injected every turn: keep a one-line trigger here, put the body "
+                        f"in a cold file.\n\n"
+                        f"Order matters — never shrink before the body is safe:\n"
+                        f"  1. write_file the body to ~/.claude/memory/knowledge/<topic>.md\n"
+                        f"  2. grep it for distinctive terms to CONFIRM it landed\n"
+                        f"  3. retry as '<trigger> -> knowledge/<topic>.md'\n\n"
+                        f"Pointer entries (knowledge/..., skill `...`, a .md path) are exempt."
+                    ),
+                    "entry_chars": len(content),
+                    "max_entry_chars": max_entry,
+                    "usage": f"{self._char_count(target):,}/{limit:,}",
+                }
 
             entries.append(content)
             self._set_entries(target, entries)
