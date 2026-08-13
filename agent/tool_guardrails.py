@@ -59,6 +59,19 @@ MUTATING_TOOL_NAMES = frozenset(
     }
 )
 
+# Mutating tools whose repeated calls can still be provably no-ops.
+#
+# These declare state rather than acting on the world, so identical arguments
+# returning a byte-identical result means nothing changed -- the same signal the
+# idempotent detector uses. They stay in MUTATING_TOOL_NAMES (a todo write is a
+# real write); this set only opts them into no-progress tracking so a model that
+# re-states the same plan instead of acting is caught.
+NO_OP_MUTATING_TOOL_NAMES = frozenset(
+    {
+        "todo",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
@@ -79,6 +92,9 @@ class ToolCallGuardrailConfig:
     no_progress_block_after: int = 5
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
+    no_op_mutating_tools: frozenset[str] = field(
+        default_factory=lambda: NO_OP_MUTATING_TOOL_NAMES
+    )
     loop_caps: "LoopCapConfig" = field(default_factory=lambda: LoopCapConfig())
 
     @classmethod
@@ -440,6 +456,8 @@ class ToolCallGuardrailController:
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
 
     def _is_idempotent(self, tool_name: str) -> bool:
+        if tool_name in self.config.no_op_mutating_tools:
+            return True
         if tool_name in self.config.mutating_tools:
             return False
         return tool_name in self.config.idempotent_tools
