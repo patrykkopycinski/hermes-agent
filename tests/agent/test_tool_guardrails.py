@@ -210,3 +210,33 @@ def test_web_search_cap_blocks_after_limit_regardless_of_hard_stop():
 
 
 
+
+
+def test_no_progress_streak_survives_turn_boundary_until_real_work_lands():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    args = {"todos": [{"id": "a", "content": "same", "status": "in_progress"}]}
+
+    for _ in range(3):
+        assert controller.before_call("todo", args).action == "allow"
+        controller.after_call("todo", args, "same-list", failed=False)
+        # Context compaction / a new user message starts a fresh turn.
+        controller.reset_for_turn()
+
+    blocked = controller.before_call("todo", args)
+    assert blocked.action == "block"
+    assert blocked.code == "no_progress_block"
+
+    # A real mutating write moves the world and clears the stale streak.
+    controller.after_call(
+        "write_file",
+        {"path": "/tmp/x", "content": "x"},
+        '{"path": "/tmp/x", "bytes_written": 1}',
+        failed=False,
+    )
+    assert controller.before_call("todo", args).action == "allow"

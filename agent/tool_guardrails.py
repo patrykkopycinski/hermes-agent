@@ -280,7 +280,14 @@ class ToolCallGuardrailController:
     def reset_for_turn(self) -> None:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
-        self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        # No-progress counters deliberately survive the turn boundary. A new
+        # ``run_conversation`` starts on context compaction and on every new
+        # user message, so clearing them here would let a bookkeeping loop that
+        # spans a compaction restart its streak at 1 and never reach
+        # ``no_progress_block_after``. They are cleared instead when the world
+        # actually moves (see ``note_progress``), not when a turn rolls over.
+        if not hasattr(self, "_no_progress"):
+            self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a
@@ -412,6 +419,14 @@ class ToolCallGuardrailController:
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
 
+        if file_mutation_result_landed(tool_name, result or ""):
+            # A write actually landed on disk: the world moved, so every
+            # carried-over no-progress streak is stale. Membership in
+            # ``mutating_tools`` is not sufficient evidence here — bookkeeping
+            # tools such as ``todo`` live in that set but change nothing.
+            self.note_progress()
+            return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
+
         # No-progress tracking applies to every tool, not just read-only ones:
         # a successful call repeated with identical arguments that keeps
         # producing no new world state is definitionally making no progress.
@@ -442,6 +457,14 @@ class ToolCallGuardrailController:
             )
 
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+
+    def note_progress(self) -> None:
+        """Clear no-progress streaks because the world actually moved.
+
+        Called when a mutating tool succeeds. Repeating a read after a real
+        write is progress, so the carried-over counters must not block it.
+        """
+        self._no_progress.clear()
 
     def _is_idempotent(self, tool_name: str) -> bool:
         if tool_name in self.config.mutating_tools:
