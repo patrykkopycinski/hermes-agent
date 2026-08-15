@@ -120,7 +120,7 @@ def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution()
 
 
 
-def test_successful_identical_signatures_block_even_when_result_hash_changes():
+def test_explicit_dedup_results_continue_no_progress_streak():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -128,19 +128,19 @@ def test_successful_identical_signatures_block_even_when_result_hash_changes():
             no_progress_block_after=3,
         )
     )
-    args = {"todos": [{"id": "loop-fix", "content": "same", "status": "in_progress"}]}
+    args = {"path": "README.md"}
 
-    assert controller.before_call("todo", args).action == "allow"
+    assert controller.before_call("read_file", args).action == "allow"
     assert controller.after_call(
-        "todo",
+        "read_file",
         args,
-        '{"todos":[{"id":"loop-fix","content":"same","status":"in_progress"}]}',
+        '{"path":"README.md","content":"same"}',
         failed=False,
     ).action == "allow"
 
-    assert controller.before_call("todo", args).action == "allow"
+    assert controller.before_call("read_file", args).action == "allow"
     second = controller.after_call(
-        "todo",
+        "read_file",
         args,
         "[Duplicate tool output — same content as a more recent call]",
         failed=False,
@@ -149,17 +149,17 @@ def test_successful_identical_signatures_block_even_when_result_hash_changes():
     assert second.code == "no_progress_warning"
     assert second.count == 2
 
-    assert controller.before_call("todo", args).action == "allow"
+    assert controller.before_call("read_file", args).action == "allow"
     third = controller.after_call(
-        "todo",
+        "read_file",
         args,
-        '{"status":"unchanged","content_returned":false}',
+        '{"status":"unchanged","dedup":true,"content_returned":false}',
         failed=False,
     )
     assert third.action == "warn"
     assert third.count == 3
 
-    blocked = controller.before_call("todo", args)
+    blocked = controller.before_call("read_file", args)
     assert blocked.action == "block"
     assert blocked.code == "no_progress_block"
     assert blocked.count == 3
@@ -213,7 +213,7 @@ def test_web_search_cap_blocks_after_limit_regardless_of_hard_stop():
 
 
 
-def test_no_progress_streak_survives_turn_boundary_until_real_work_lands():
+def test_new_user_turn_clears_no_progress_streak():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -226,21 +226,30 @@ def test_no_progress_streak_survives_turn_boundary_until_real_work_lands():
     for _ in range(3):
         assert controller.before_call("todo", args).action == "allow"
         controller.after_call("todo", args, "same-list", failed=False)
-        # Context compaction / a new user message starts a fresh turn.
-        controller.reset_for_turn()
 
     blocked = controller.before_call("todo", args)
     assert blocked.action == "block"
     assert blocked.code == "no_progress_block"
 
-    # A real mutating write moves the world and clears the stale streak.
-    controller.after_call(
-        "write_file",
-        {"path": "/tmp/x", "content": "x"},
-        '{"path": "/tmp/x", "bytes_written": 1}',
-        failed=False,
-    )
+    controller.reset_for_turn()
     assert controller.before_call("todo", args).action == "allow"
+
+
+def test_changed_read_result_restarts_no_progress_streak():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    args = {"query": "latest state"}
+
+    for result in ("one", "two", "three", "four"):
+        assert controller.before_call("web_search", args).action == "allow"
+        decision = controller.after_call("web_search", args, result, failed=False)
+        assert decision.action == "allow"
+        assert decision.count == 1
 
 
 def test_guardrail_signature_normalizes_housekeeping_arg_jitter():
@@ -264,7 +273,9 @@ def test_guardrail_signature_normalizes_housekeeping_arg_jitter():
             ],
         },
     )
-    assert todo_a == todo_b
+    # Todo list order is priority and merge changes write semantics, so this
+    # jitter must remain visible to the guardrail.
+    assert todo_a != todo_b
 
     assert ToolCallSignature.from_call("skill_view", {"name": "hermes-agent"}) == ToolCallSignature.from_call(
         "skill_view",
@@ -282,7 +293,7 @@ def test_guardrail_signature_normalizes_housekeeping_arg_jitter():
     )
 
 
-def test_no_progress_blocks_todo_loop_despite_merge_and_order_jitter():
+def test_no_progress_blocks_repeated_identical_todo_state():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(
             hard_stop_enabled=True,
@@ -290,16 +301,28 @@ def test_no_progress_blocks_todo_loop_despite_merge_and_order_jitter():
             no_progress_block_after=3,
         )
     )
-    variants = [
-        {"merge": True, "todos": [{"id": "b", "content": "same", "status": "pending"}, {"id": "a", "content": "same", "status": "in_progress"}]},
-        {"merge": False, "todos": [{"id": "a", "content": "same", "status": "in_progress"}, {"id": "b", "content": "same", "status": "pending"}]},
-        {"todos": [{"id": "b", "content": "same", "status": "pending"}, {"id": "a", "content": "same", "status": "in_progress"}]},
-    ]
+    args = {"todos": [{"id": "a", "content": "same", "status": "in_progress"}]}
 
-    for args in variants:
+    for _ in range(3):
         assert controller.before_call("todo", args).action == "allow"
         controller.after_call("todo", args, "same-list", failed=False)
 
-    blocked = controller.before_call("todo", variants[1])
+    blocked = controller.before_call("todo", args)
     assert blocked.action == "block"
     assert blocked.count == 3
+
+
+def test_arbitrary_mutating_tool_is_not_blocked_from_identical_stdout():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    args = {"command": "make step"}
+
+    for _ in range(5):
+        assert controller.before_call("terminal", args).action == "allow"
+        decision = controller.after_call("terminal", args, "ok", failed=False)
+        assert decision.action == "allow"

@@ -59,6 +59,12 @@ MUTATING_TOOL_NAMES = frozenset(
     }
 )
 
+# Successful writes are not generally safe to classify as no-progress from
+# their output alone: an identical terminal/process result may still represent
+# a real side effect. ``todo`` is the narrow exception because the tool returns
+# its complete in-memory state after every call.
+NO_PROGRESS_STATE_TOOL_NAMES = frozenset({"todo"})
+
 
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
@@ -231,19 +237,6 @@ def normalize_tool_args_for_guardrail(tool_name: str, args: Mapping[str, Any]) -
     """
     normalized = dict(args)
 
-    if tool_name == "todo":
-        # ``merge`` changes how the todo tool applies an update, but repeated
-        # writes of the same final list with merge toggled are the same
-        # bookkeeping no-op from the guardrail's perspective.
-        normalized.pop("merge", None)
-        todos = normalized.get("todos")
-        if isinstance(todos, list):
-            normalized["todos"] = sorted(
-                todos,
-                key=lambda item: str(item.get("id", "")) if isinstance(item, Mapping) else str(item),
-            )
-        return normalized
-
     if tool_name == "skill_view":
         if normalized.get("file_path") is None:
             normalized.pop("file_path", None)
@@ -317,14 +310,12 @@ class ToolCallGuardrailController:
     def reset_for_turn(self) -> None:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
-        # No-progress counters deliberately survive the turn boundary. A new
-        # ``run_conversation`` starts on context compaction and on every new
-        # user message, so clearing them here would let a bookkeeping loop that
-        # spans a compaction restart its streak at 1 and never reach
-        # ``no_progress_block_after``. They are cleared instead when the world
-        # actually moves (see ``note_progress``), not when a turn rolls over.
-        if not hasattr(self, "_no_progress"):
-            self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        # This method is called once at the prologue of a real user turn.
+        # Preflight and mid-turn context compression stay inside the same
+        # ``run_conversation`` and therefore do not reset this state. Clearing
+        # here prevents one user's completed request from poisoning a later,
+        # independent request for the same stable resource.
+        self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a
@@ -464,18 +455,23 @@ class ToolCallGuardrailController:
             self.note_progress()
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
-        # No-progress tracking applies to every tool, not just read-only ones:
-        # a successful call repeated with identical arguments that keeps
-        # producing no new world state is definitionally making no progress.
+        # Arbitrary mutating tools cannot be classified from their output:
+        # repeating a terminal/process call may have a real side effect even
+        # when stdout is byte-identical. Track read-only calls plus the narrow
+        # state-returning ``todo`` tool only.
+        if not self._is_idempotent(tool_name) and tool_name not in NO_PROGRESS_STATE_TOOL_NAMES:
+            self._no_progress.pop(signature, None)
+            return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
+
         result_hash = _result_hash(result)
         previous = self._no_progress.get(signature)
         repeat_count = 1
-        if previous is not None:
-            # Count repeated identical tool signatures, not repeated result
-            # hashes. Context compression and tool-level de-duplication may
-            # intentionally return a different payload for the same no-op call
-            # (for example a duplicate-output stub), but the repeated call is
-            # still not progress.
+        if previous is not None and (
+            previous[0] == result_hash or _is_explicit_no_progress_result(result)
+        ):
+            # A dedup stub is explicit evidence that the underlying result is
+            # unchanged even though its envelope hashes differently. Every
+            # other changed result is progress and restarts the streak.
             repeat_count = previous[1] + 1
         self._no_progress[signature] = (result_hash, repeat_count)
 
@@ -634,6 +630,21 @@ def _result_hash(result: str | None) -> str:
     else:
         canonical = result or ""
     return _sha256(canonical)
+
+
+def _is_explicit_no_progress_result(result: str | None) -> bool:
+    """Return whether a result explicitly denotes a duplicate/unchanged read."""
+    if not isinstance(result, str):
+        return False
+    if result.lstrip().startswith("[Duplicate tool output"):
+        return True
+    parsed = safe_json_loads(result)
+    return bool(
+        isinstance(parsed, dict)
+        and parsed.get("status") == "unchanged"
+        and parsed.get("dedup") is True
+        and parsed.get("content_returned") is False
+    )
 
 
 def _as_bool(value: Any, default: bool) -> bool:
