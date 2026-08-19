@@ -34,7 +34,12 @@ def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     if not isinstance(data, dict) or data.get("error"):
         return False
     if tool_name == "write_file":
-        return "bytes_written" in data
+        # ``bytes_written`` is the historical proof-of-write field, but the
+        # tool may instead report a verified content hash. Either is
+        # sufficient evidence that the write reached disk; requiring only the
+        # former silently misses real mutations and leaves stale no-progress
+        # streaks in place, blocking the legitimate read-back that follows.
+        return "bytes_written" in data or data.get("verified") is True
     if tool_name == "patch":
         return data.get("success") is True
     return False
