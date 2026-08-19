@@ -173,6 +173,40 @@ function mediaLink(value: string): string {
   return `[${mediaDisplayLabel(path)}](${mediaMarkdownHref(path)})`
 }
 
+const FENCE_LANG =
+  'txt|text|bash|sh|shell|console|python|py|md|markdown|json|yaml|yml|ts|tsx|js|jsx|diff|html|css|sql|toml|ini|xml|go|rs|c|cpp|java|rb|php|swift|kt|lua|dockerfile'
+
+/**
+ * Restore markdown block separators lost when streamed/interim reconstruction
+ * collapsed whitespace. Same contract as Python
+ * `_repair_glued_markdown_block_boundaries`.
+ */
+export function repairGluedMarkdownBlockBoundaries(text: string): string {
+  if (!text) {
+    return text
+  }
+
+  let next = text.replace(new RegExp('(?<!`)```(?:' + FENCE_LANG + ')(?=[^\\n`])', 'gi'), match => `${match}\n`)
+  next = next.replace(/([^`\n])```(?=\S)/g, '$1\n```\n\n')
+
+  return next
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, idx) => {
+      if (idx % 2 === 1) {
+        return part.replace(/([^`\n])```$/, '$1\n```')
+      }
+
+      return part
+        .replace(/---(?=#{1,6}\s)/g, '---\n\n')
+        .replace(/([.!?`*])(?=#{1,6}\s)/g, '$1\n\n')
+        .replace(/^(#{1,6}\s+[^\n|]+)\|(?=\s*[^\n]*\|)/gm, '$1\n\n|')
+        .replace(/^(\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|)\|(?=\s*\S)/gm, '$1\n|')
+        .replace(/^(#{1,6}\s+[^\n-]{1,80})-\s+(?=\S)/gm, '$1\n\n- ')
+        .replace(/(`[^`\n]+`)\.(`[^`\n]+`)/g, '$1.\n\n$2')
+    })
+    .join('')
+}
+
 export function renderMediaTags(text: string): string {
   return text
     .replace(
@@ -185,7 +219,7 @@ export function renderMediaTags(text: string): string {
 }
 
 export function assistantTextPart(text: string, timestamp?: number): ChatMessagePart {
-  return textPart(renderMediaTags(text), timestamp)
+  return textPart(renderMediaTags(repairGluedMarkdownBlockBoundaries(text)), timestamp)
 }
 
 export function chatMessageText(message: ChatMessage): string {

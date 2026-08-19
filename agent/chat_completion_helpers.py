@@ -2111,6 +2111,67 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     )
 
 
+_FENCE_LANG = (
+    r"txt|text|bash|sh|shell|console|python|py|md|markdown|json|yaml|yml|"
+    r"ts|tsx|js|jsx|diff|html|css|sql|toml|ini|xml|go|rs|c|cpp|java|"
+    r"rb|php|swift|kt|lua|dockerfile"
+)
+
+
+def _repair_glued_markdown_block_boundaries(text: str) -> str:
+    """Restore markdown block separators lost by streamed/interim reconstruction.
+
+    Observed live (session 20260819_223427_6bc23a): OmniRoute returned
+    well-formed fences / ``---`` / ``##`` / tables; Hermes persisted a
+    whitespace-collapsed copy where inline markup survived but block
+    boundaries were glued (````txtv=spf1...```**DMARC**``, ``---##``,
+    ``asked| Idea``, ``|---|---|| row``).
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    # Make collapsed fences parseable before splitting on them.
+    text = re.sub(
+        rf"(?<!`)```({_FENCE_LANG})(?=[^\n`])",
+        r"```\1\n",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"([^`\n])```(?=\S)", r"\1\n```\n\n", text)
+
+    fence_re = re.compile(r"(```.*?```)", re.DOTALL)
+
+    def repair_segment(segment: str) -> str:
+        if not segment:
+            return segment
+        segment = re.sub(r"---(?=#{1,6}\s)", "---\n\n", segment)
+        segment = re.sub(r"([.!?`*])(?=#{1,6}\s)", r"\1\n\n", segment)
+        segment = re.sub(
+            r"(?m)^(#{1,6}\s+[^\n|]+)\|(?=\s*[^\n]*\|)",
+            r"\1\n\n|",
+            segment,
+        )
+        segment = re.sub(
+            r"(?m)^(\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|)\|(?=\s*\S)",
+            r"\1\n|",
+            segment,
+        )
+        segment = re.sub(
+            r"(?m)^(#{1,6}\s+[^\n-]{1,80})-\s+(?=\S)",
+            r"\1\n\n- ",
+            segment,
+        )
+        segment = re.sub(r"(`[^`\n]+`)\.(`[^`\n]+`)", r"\1.\n\n\2", segment)
+        return segment
+
+    parts = fence_re.split(text)
+    for idx, part in enumerate(parts):
+        if idx % 2 == 0:
+            parts[idx] = repair_segment(part)
+        else:
+            parts[idx] = re.sub(r"([^`\n])```$", r"\1\n```", part)
+    return "".join(parts)
+
 
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict from an API response message.
@@ -2170,6 +2231,7 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # compression, title generation.
     if isinstance(_san_content, str) and _san_content:
         _san_content = agent._strip_think_blocks(_san_content).strip()
+        _san_content = _repair_glued_markdown_block_boundaries(_san_content)
 
     # Defence-in-depth: redact credentials (PATs, API keys, Bearer tokens)
     # from assistant content BEFORE the message enters conversation history.
