@@ -24,6 +24,8 @@ IDEMPOTENT_TOOL_NAMES = frozenset(
         "web_search",
         "web_extract",
         "session_search",
+        "skill_view",
+        "skills_list",
         "browser_snapshot",
         "browser_console",
         "browser_get_images",
@@ -307,15 +309,25 @@ class ToolCallGuardrailController:
         self.config = config or ToolCallGuardrailConfig()
         self.reset_for_turn()
 
-    def reset_for_turn(self) -> None:
+    def reset_for_turn(self, *, new_user_input: bool = True) -> None:
+        """Reset per-turn counters.
+
+        ``new_user_input`` distinguishes a genuine new user request from an
+        internal turn restart (context compaction, preflight). Only a real user
+        message clears the no-progress streaks: a compaction-triggered restart
+        that cleared them would let a bookkeeping loop spanning the compaction
+        restart its streak at 1 on every lap and never reach
+        ``no_progress_block_after`` — which is exactly how the 2026-08-19
+        twenty-turn skill-reload loop stayed invisible to this controller.
+        """
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
-        # This method is called once at the prologue of a real user turn.
-        # Preflight and mid-turn context compression stay inside the same
-        # ``run_conversation`` and therefore do not reset this state. Clearing
-        # here prevents one user's completed request from poisoning a later,
-        # independent request for the same stable resource.
-        self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        if new_user_input or not hasattr(self, "_no_progress"):
+            # A new user request is a legitimate reason to re-read a stable
+            # resource, so one user's completed request must not poison a
+            # later, independent one. Streaks are otherwise cleared when the
+            # world actually moves (see ``note_progress``).
+            self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a

@@ -326,3 +326,87 @@ def test_arbitrary_mutating_tool_is_not_blocked_from_identical_stdout():
         assert controller.before_call("terminal", args).action == "allow"
         decision = controller.after_call("terminal", args, "ok", failed=False)
         assert decision.action == "allow"
+
+
+def test_skill_pruned_reload_loop_is_blocked_across_turn_boundaries():
+    """Regression: the 2026-08-19 twenty-turn loop.
+
+    A post-compression banner listed 18 pruned skills. Each ``skill_view``
+    returned a ``[SKILL_PRUNED: ...]`` marker whose text instructs the agent to
+    reissue the very same call. Every lap was a SEPARATE turn, so any counter
+    cleared by ``reset_for_turn`` would never reach its threshold.
+    """
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    args = {"name": "kibana-evals"}
+    pruned = "[skill_view] name=kibana-evals (7,719 chars) [SKILL_PRUNED: content lost in compression]"
+
+    for _ in range(3):
+        # Each lap is a compaction-triggered turn restart, NOT new user input.
+        controller.reset_for_turn(new_user_input=False)
+        assert controller.before_call("skill_view", args).action == "allow"
+        controller.after_call("skill_view", args, pruned, failed=False)
+
+    controller.reset_for_turn(new_user_input=False)
+    blocked = controller.before_call("skill_view", args)
+    assert blocked.action == "block"
+    assert blocked.code == "no_progress_block"
+
+    # A genuine new user request is allowed to re-read the same skill.
+    controller.reset_for_turn(new_user_input=True)
+    assert controller.before_call("skill_view", args).action == "allow"
+
+
+def test_dedup_stub_counts_as_no_progress_despite_different_hash():
+    """The compressor replaces a repeat with a stub that hashes differently.
+
+    Without explicit handling the streak resets to 1 forever, which is exactly
+    how the observed todo loop stayed invisible to the hash comparison.
+    """
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    args = {"todos": [{"id": "a", "content": "same", "status": "in_progress"}]}
+
+    controller.after_call("todo", args, "the real list", failed=False)
+    for _ in range(2):
+        stub = "[Duplicate tool output — same content as a more recent call]"
+        controller.after_call("todo", args, stub, failed=False)
+
+    blocked = controller.before_call("todo", args)
+    assert blocked.action == "block"
+    assert blocked.code == "no_progress_block"
+
+
+def test_real_file_write_clears_streak_so_reread_is_allowed():
+    """A read repeated AFTER a landed write is progress, not a loop."""
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            no_progress_warn_after=2,
+            no_progress_block_after=3,
+        )
+    )
+    read_args = {"path": "/tmp/x.py"}
+
+    for _ in range(3):
+        controller.after_call("read_file", read_args, "same content", failed=False)
+    assert controller.before_call("read_file", read_args).action == "block"
+
+    controller.after_call(
+        "write_file",
+        {"path": "/tmp/x.py", "content": "new"},
+        json.dumps({"success": True, "verified": True, "path": "/tmp/x.py"}),
+        failed=False,
+    )
+
+    assert controller.before_call("read_file", read_args).action == "allow"
