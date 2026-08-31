@@ -88,8 +88,15 @@ const $primaryMessages = primaryField<ChatMessage[]>(state => state.messages, $m
  * focusing B while A runs marked B busy. The draft atom is only for a true
  * new chat (no stored id) so the first-send optimistic lock still paints.
  */
-const $primaryBusy = computed([$primaryState, $busy, $selectedStoredSessionId], (state, draftBusy, selected) =>
-  state ? state.busy : selected ? false : draftBusy
+const $primaryBusy = computed(
+  [$primaryState, $busy, $selectedStoredSessionId, $workingSessionIds],
+  (state, draftBusy, selected, working) => {
+    if (state) {
+      return state.busy
+    }
+
+    return selected ? working.includes(selected) : draftBusy
+  }
 )
 
 export const PRIMARY_SESSION_VIEW: SessionView = {
