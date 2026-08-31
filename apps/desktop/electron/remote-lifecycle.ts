@@ -896,6 +896,17 @@ finally:
 // Python keeps the descriptor close-on-exec by default and passes it explicitly
 // only to the intended outer shell; each detached child closes it before
 // execing Hermes.
+/**
+ * Serialize a remote command behind an flock'd mutex file.
+ *
+ * `mutexPath` is expandRemotePath() output — an already shell-quoted fragment
+ * (`"$HOME"'/…'`) — and is embedded RAW so the shell expands $HOME before
+ * python sees it. shq()ing it again passed the quote characters through to
+ * argv, and `os.makedirs` then built a directory literally named `'` holding
+ * the whole path: the mutex was created somewhere nobody else looks, so
+ * concurrent updates stopped excluding each other. Same hazard the reservation
+ * / lockPath fragments are commented for below.
+ */
 function withRemoteUpdateMutex(command, mutexPath) {
   const script = `
 import fcntl,os,subprocess,sys
@@ -913,7 +924,7 @@ finally:
 sys.exit(result.returncode if result is not None else 1)
 `.trim()
 
-  return `python3 -c ${shq(script)} ${shq(mutexPath)} ${shq(command)}`
+  return `python3 -c ${shq(script)} ${mutexPath} ${shq(command)}`
 }
 
 /**
