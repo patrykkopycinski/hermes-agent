@@ -827,6 +827,24 @@ test('buildSpawnCommand atomically reserves the ownership slot through spawn and
   assert.ok(cmd.indexOf('lock_json') > cmd.indexOf('serve --isolated'))
 })
 
+
+test('update mutex reaches python as a path, not a quote-wrapped literal', () => {
+  const cmd = buildSpawnCommand('~/.local/bin/hermes', '', {
+    hermesHome: '~/.hermes',
+    logPath: '~/.hermes/logs/spawn.log'
+  })
+
+  // The mutex is argv[1] of the python3 -c lock wrapper. It must arrive as a
+  // shell fragment the SHELL expands ("$HOME"'/...'), never shq()'d a second
+  // time -- python's os.makedirs then took the quotes literally and built a
+  // directory named `'` holding the whole path, so the lock guarded nothing
+  // and the stray tree landed in the repo.
+  const mutexArg = cmd.match(/python3 -c '[\s\S]*?' (\S+) /)?.[1]
+
+  assert.equal(mutexArg, `"$HOME"'/.hermes/.hermes-update-in-progress.mutex'`)
+  assert.doesNotMatch(String(mutexArg), /^'"/)
+})
+
 test.skipIf(process.platform === 'win32')('detached backend does not inherit the update mutex descriptor', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'hermes-update-mutex-'))
   const hermesPath = path.join(directory, 'hermes')
