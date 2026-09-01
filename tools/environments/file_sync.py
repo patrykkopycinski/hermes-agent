@@ -438,6 +438,9 @@ class FileSyncManager:
                 upload_only_host_paths = (
                     self._upload_only_host_paths | _credential_host_paths()
                 )
+                dir_index = self._build_dir_index(
+                    file_mapping, upload_only_host_paths
+                )
                 for dirpath, _dirnames, filenames in os.walk(staging):
                     for fname in filenames:
                         staged_file = os.path.join(dirpath, fname)
@@ -460,7 +463,7 @@ class FileSyncManager:
                             host_path = self._infer_host_path(
                                 remote_path,
                                 file_mapping,
-                                upload_only_host_paths=upload_only_host_paths,
+                                dir_index=dir_index,
                             )
                             if host_path is None:
                                 logger.debug(
@@ -507,7 +510,8 @@ class FileSyncManager:
     def _infer_host_path(self, remote_path: str,
                          file_mapping: list[tuple[str, str]] | None = None,
                          *,
-                         upload_only_host_paths: set[str] | None = None) -> str | None:
+                         upload_only_host_paths: set[str] | None = None,
+                         dir_index: list[tuple[str, str]] | None = None) -> str | None:
         """Infer a host path for a new remote file by matching path prefixes.
 
         Uses the existing file mapping to find a remote->host directory
@@ -515,11 +519,16 @@ class FileSyncManager:
         For example, if the mapping has ``/root/.hermes/skills/a.md`` →
         ``~/.hermes/skills/a.md``, a new remote file at
         ``/root/.hermes/skills/b.md`` maps to ``~/.hermes/skills/b.md``.
+
+        ``dir_index`` is the precomputed result of :meth:`_build_dir_index`;
+        callers resolving many files should build it once and pass it in.
         """
-        mapping = file_mapping if file_mapping is not None else []
-        upload_only_host_paths = upload_only_host_paths or set()
-        index = self._build_dir_index(mapping, upload_only_host_paths)
-        for remote_dir, host_dir in index:
+        if dir_index is None:
+            dir_index = self._build_dir_index(
+                file_mapping if file_mapping is not None else [],
+                upload_only_host_paths or set(),
+            )
+        for remote_dir, host_dir in dir_index:
             if remote_path.startswith(remote_dir + "/"):
                 suffix = remote_path[len(remote_dir):]
                 return host_dir + suffix
@@ -530,21 +539,13 @@ class FileSyncManager:
         mapping: list[tuple[str, str]],
         upload_only_host_paths: set[str],
     ) -> list[tuple[str, str]]:
-        """Precompute the (remote_dir, host_dir) pairs used for inference.
+        """Collapse the file mapping to deduplicated (remote_dir, host_dir) pairs.
 
-        Both the upload-only filter and the ``Path(..).parent`` calls are
-        loop-invariant per sync, but ``_infer_host_path`` used to redo them
-        for every candidate mapping of every file: 6.6k files x 6.6k mappings
-        drove 3.4M ``_is_upload_only_host_path`` calls and 27M ``lstat``
-        syscalls (111s of a 146s profiled sync_back).  Cache the result,
-        keyed on the mapping identity plus the filter set, preserving the
-        original first-match-wins order.
+        The upload-only filter and the ``Path(..).parent`` calls are constant
+        for a whole sync, so this is built once per ``sync_back`` and reused
+        for every file rather than recomputed per candidate mapping. Preserves
+        first-match-wins order.
         """
-        cache_key = (id(mapping), len(mapping), frozenset(upload_only_host_paths))
-        cached = getattr(self, "_dir_index_cache", None)
-        if cached is not None and cached[0] == cache_key:
-            return cached[1]
-
         seen: set[tuple[str, str]] = set()
         index: list[tuple[str, str]] = []
         for host, remote in mapping:
@@ -555,8 +556,6 @@ class FileSyncManager:
                 continue
             seen.add(pair)
             index.append(pair)
-
-        self._dir_index_cache = (cache_key, index)
         return index
 
     @staticmethod
