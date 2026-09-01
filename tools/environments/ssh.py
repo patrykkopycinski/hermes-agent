@@ -291,16 +291,17 @@ class SSHEnvironment(BaseEnvironment):
             #
             # It is a GNU tar flag.  BSD tar (macOS, FreeBSD remotes) rejects
             # it outright, exits immediately, and the local tar then dies of
-            # SIGPIPE reporting a misleading "tar: Write error".  Probe the
-            # remote tar once and only pass the flag where it is supported;
-            # BSD tar does not overwrite existing directory modes anyway, so
-            # omitting it there preserves the same property.
-            extract_cmd = f"tar xf - -C {shlex.quote(base)}"
-            if self._remote_tar_supports_no_overwrite_dir():
-                extract_cmd = (
-                    f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}"
-                )
-            ssh_cmd.append(extract_cmd)
+            # SIGPIPE reporting a misleading "tar: Write error".  Let the
+            # remote shell pick: GNU takes the flag, BSD falls back without
+            # it -- BSD tar does not overwrite existing directory modes
+            # anyway, so the property is preserved either way.  Negotiating
+            # in-band keeps this a single round trip (no capability probe).
+            quoted_base = shlex.quote(base)
+            ssh_cmd.append(
+                f"if tar --no-overwrite-dir --version >/dev/null 2>&1; "
+                f"then exec tar xf - --no-overwrite-dir -C {quoted_base}; "
+                f"else exec tar xf - -C {quoted_base}; fi"
+            )
 
             tar_proc = subprocess.Popen(
                 tar_cmd,
@@ -366,36 +367,6 @@ class SSHEnvironment(BaseEnvironment):
                 )
 
         logger.debug("SSH: bulk-uploaded %d file(s) via tar pipe", len(files))
-
-    def _remote_tar_supports_no_overwrite_dir(self) -> bool:
-        """Return whether the remote tar accepts GNU's --no-overwrite-dir.
-
-        Probed once per connection and cached. BSD tar (macOS, FreeBSD)
-        rejects the flag and exits immediately, which makes the local tar
-        in the upload pipe die of SIGPIPE with a misleading write error.
-        Failure to probe is treated as "unsupported" so the sync still runs.
-        """
-        cached = getattr(self, "_tar_no_overwrite_dir", None)
-        if cached is not None:
-            return cached
-
-        supported = False
-        try:
-            cmd = self._build_ssh_command()
-            cmd.append("tar --help 2>&1 | grep -q -- --no-overwrite-dir")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-                stdin=subprocess.DEVNULL,
-                timeout=15,
-            )
-            supported = result.returncode == 0
-        except Exception:
-            supported = False
-
-        self._tar_no_overwrite_dir = supported
-        return supported
 
     def _ssh_bulk_download(self, dest: Path, paths: list[str] | None = None) -> None:
         """Download remote .hermes/ as a tar archive.
