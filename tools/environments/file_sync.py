@@ -518,15 +518,46 @@ class FileSyncManager:
         """
         mapping = file_mapping if file_mapping is not None else []
         upload_only_host_paths = upload_only_host_paths or set()
-        for host, remote in mapping:
-            if self._is_upload_only_host_path(host, upload_only_host_paths):
-                continue
-            remote_dir = str(Path(remote).parent)
+        index = self._build_dir_index(mapping, upload_only_host_paths)
+        for remote_dir, host_dir in index:
             if remote_path.startswith(remote_dir + "/"):
-                host_dir = str(Path(host).parent)
                 suffix = remote_path[len(remote_dir):]
                 return host_dir + suffix
         return None
+
+    def _build_dir_index(
+        self,
+        mapping: list[tuple[str, str]],
+        upload_only_host_paths: set[str],
+    ) -> list[tuple[str, str]]:
+        """Precompute the (remote_dir, host_dir) pairs used for inference.
+
+        Both the upload-only filter and the ``Path(..).parent`` calls are
+        loop-invariant per sync, but ``_infer_host_path`` used to redo them
+        for every candidate mapping of every file: 6.6k files x 6.6k mappings
+        drove 3.4M ``_is_upload_only_host_path`` calls and 27M ``lstat``
+        syscalls (111s of a 146s profiled sync_back).  Cache the result,
+        keyed on the mapping identity plus the filter set, preserving the
+        original first-match-wins order.
+        """
+        cache_key = (id(mapping), len(mapping), frozenset(upload_only_host_paths))
+        cached = getattr(self, "_dir_index_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        seen: set[tuple[str, str]] = set()
+        index: list[tuple[str, str]] = []
+        for host, remote in mapping:
+            if self._is_upload_only_host_path(host, upload_only_host_paths):
+                continue
+            pair = (str(Path(remote).parent), str(Path(host).parent))
+            if pair in seen:
+                continue
+            seen.add(pair)
+            index.append(pair)
+
+        self._dir_index_cache = (cache_key, index)
+        return index
 
     @staticmethod
     def _is_upload_only_host_path(host_path: str, upload_only_host_paths: set[str]) -> bool:
