@@ -11,6 +11,8 @@ the call-site placement, which are the properties that actually decay, rather
 than wall-clock timing.
 """
 
+import inspect
+import textwrap
 from unittest.mock import patch
 
 from tools.environments.file_sync import FileSyncManager
@@ -69,9 +71,6 @@ class TestInferHostPathScaling:
         ``_build_dir_index`` call back inside the ``os.walk`` loop restores
         the O(files x mappings) blowup with every other test still green.
         """
-        import inspect
-        import textwrap
-
         src = textwrap.dedent(inspect.getsource(FileSyncManager._sync_back_impl))
         build_col = src.index("self._build_dir_index(")
         walk_col = src.index("for dirpath, _dirnames, filenames in os.walk(")
