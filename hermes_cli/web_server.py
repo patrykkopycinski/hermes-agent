@@ -19356,6 +19356,17 @@ def _start_parent_death_watchdog() -> None:
     Desktop versions that provide only ``HERMES_PARENT_PID`` retain PID-only
     tracking.
     """
+    # Never arm under pytest.  The watchdog's whole job is to os._exit(0)
+    # the process it runs in, which under a test runner means killing the
+    # runner itself: the suite stops mid-file, pytest never reaches
+    # sessionfinish, no summary or --junit-xml is written, and the shell
+    # still sees exit 0.  That reads as a pass.  A test process inherits
+    # HERMES_PARENT_PID from whatever launched it (e.g. the desktop app),
+    # so any test that calls start_server() would otherwise arm a killer
+    # aimed at an unrelated parent.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
     raw_pid = os.environ.get("HERMES_PARENT_PID")
     start_marker = os.environ.get("HERMES_PARENT_START_MARKER")
     nonce = os.environ.get("HERMES_PARENT_NONCE")
