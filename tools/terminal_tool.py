@@ -1607,6 +1607,12 @@ def _parse_env_var(name: str, default: str, converter: Any = int, type_label: st
     causes an unhandled ValueError that kills every terminal command.
     """
     raw = os.getenv(name, default)
+    # An env var that is set-but-empty (blank line in .env, an unset shell
+    # expansion, or a config default that means "not configured") should fall
+    # back to *default* rather than blowing up every terminal command on
+    # int('').
+    if raw == "" and default != "":
+        raw = default
     try:
         return converter(raw)
     except (ValueError, json.JSONDecodeError):
