@@ -374,9 +374,8 @@ class SSHEnvironment(BaseEnvironment):
         *paths* limits the archive to specific absolute remote paths. sync_back
         only ever applies files it previously pushed, so restricting the tar to
         those keeps it proportional to what was sent rather than to the size of
-        the remote ~/.hermes (multi-GB on a real install: the Hermes checkout,
-        bundled node, LSP servers). Without it the tar reliably exceeds both
-        timeout=120 and the 2 GiB extraction cap, so sync-back never completes.
+        the remote ~/.hermes, which on a real install holds the Hermes checkout,
+        a bundled node, and LSP servers and runs to multiple GB.
         """
         # Tar from / with the full path so archive entries preserve absolute
         # paths (e.g. home/user/.hermes/skills/f.py), matching _pushed_hashes keys.
