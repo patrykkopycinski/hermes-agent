@@ -344,6 +344,20 @@ def _safe_skills_path(skills_dir: Path) -> str:
     return str(safe_dir)
 
 
+def _is_syncable_sync_file(item) -> bool:
+    """Return whether a directory entry should be synced to a remote env.
+
+    Skips symlinks, non-files, and macOS AppleDouble sidecars (``._name``).
+    AppleDouble files carry only HFS metadata, never skill content, and are
+    created by the OS on any non-native filesystem. On a real install they are
+    ~50% of the sync set; they also disappear between enumeration and transfer,
+    which makes tar emit "Cannot stat" errors and exit non-zero mid-stream.
+    """
+    if item.is_symlink() or not item.is_file():
+        return False
+    return not item.name.startswith("._")
+
+
 def iter_skills_files(
     container_base: str = "/root/.hermes",
 ) -> List[Dict[str, str]]:
@@ -361,7 +375,7 @@ def iter_skills_files(
     if skills_dir.is_dir():
         container_root = f"{container_base.rstrip('/')}/skills"
         for item in skills_dir.rglob("*"):
-            if item.is_symlink() or not item.is_file():
+            if not _is_syncable_sync_file(item):
                 continue
             rel = item.relative_to(skills_dir)
             result.append({
@@ -377,7 +391,7 @@ def iter_skills_files(
                 continue
             container_root = f"{container_base.rstrip('/')}/external_skills/{idx}"
             for item in ext_dir.rglob("*"):
-                if item.is_symlink() or not item.is_file():
+                if not _is_syncable_sync_file(item):
                     continue
                 rel = item.relative_to(ext_dir)
                 result.append({
@@ -389,7 +403,7 @@ def iter_skills_files(
                 continue
             container_root = f"{container_base.rstrip('/')}/project_skills/{idx}"
             for item in proj_dir.rglob("*"):
-                if item.is_symlink() or not item.is_file():
+                if not _is_syncable_sync_file(item):
                     continue
                 rel = item.relative_to(proj_dir)
                 result.append({
@@ -586,7 +600,7 @@ def iter_cache_files(
             continue
         container_root = f"{container_base.rstrip('/')}/{new_subpath}"
         for item in host_dir.rglob("*"):
-            if item.is_symlink() or not item.is_file():
+            if not _is_syncable_sync_file(item):
                 continue
             rel = item.relative_to(host_dir)
             result.append({
