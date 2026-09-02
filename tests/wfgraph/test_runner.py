@@ -3,7 +3,10 @@
 import threading
 import time
 
+import pytest
+
 from wfgraph.runner import (
+    WorkflowGraphError,
     advance,
     request_pause,
     resolve_event,
@@ -12,7 +15,7 @@ from wfgraph.runner import (
     start_matching,
     start_run,
 )
-from wfgraph.store import load_events, load_run, save_documents, save_run
+from wfgraph.store import list_runs, load_events, load_run, save_documents, save_run
 from wfgraph.topology import parse_poll, parse_wait_seconds
 
 
@@ -636,7 +639,12 @@ def test_start_run_replaces_a_dead_running_run(tmp_path, monkeypatch):
 
 def test_unready_queue_fails_instead_of_succeeding(tmp_path, monkeypatch):
     """A cycle with no loop flag has no start. That is a stuck graph, not a
-    successful empty run."""
+    successful empty run.
+
+    It used to be caught late: the run started, sat, and the readiness sweep
+    gave up with 'never became ready'. It is now rejected at start_run with the
+    cause named, so the assertion moved from "ends failed" to "never starts".
+    """
     _put(
         monkeypatch,
         tmp_path,
@@ -653,6 +661,7 @@ def test_unready_queue_fails_instead_of_succeeding(tmp_path, monkeypatch):
             ),
         },
     )
-    state = start_run("cycle", execute_fn=_agent, background=False)
-    assert state["status"] == "failed"
-    assert state["ran"] == []
+    with pytest.raises(WorkflowGraphError) as excinfo:
+        start_run("cycle", execute_fn=_agent, background=False)
+    assert "loop" in str(excinfo.value)
+    assert list_runs("cycle") == [], "a graph rejected at the door leaves no run behind"

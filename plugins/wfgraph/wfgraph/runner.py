@@ -158,6 +158,8 @@ def start_run(
         state["fake"] = True
     steps = steps_of(scenario)
     _reject_unknown_kinds(steps)
+    _reject_bad_gate_arms(steps)
+    _reject_deadlocked_back_edges(scenario, steps)
     entries = [s["id"] for s in steps if not preds(scenario, s["id"])]
     if not entries and steps:
         entries = [steps[0]["id"]]
@@ -433,6 +435,14 @@ def _run_trigger(state: dict, step: dict, iteration: int) -> None:
 
 def _arm_matches(arm: dict, inputs: list[dict], state: dict, execute_fn: ExecuteFn | None) -> bool:
     when = arm.get("when") or {}
+    if not isinstance(when, dict):
+        # Validated at start_run; this is the belt to that braces, so a gate
+        # reached by some other path still fails as a graph error rather than
+        # an AttributeError from the middle of a run.
+        raise WorkflowGraphError(
+            f"gate arm {arm.get('id')!r} has a {type(when).__name__} 'when'; "
+            "expected an object like {'mode': 'all-pass'}"
+        )
     if when.get("mode") != "prose":
         return holds(when, inputs)
     source = str(when.get("source") or "").strip() or "Should this arm be taken? Answer PASS or FAIL."
@@ -469,6 +479,66 @@ class WorkflowGraphError(ValueError):
 # report "succeeded" having done nothing at all — a typo in `kind` read as a
 # green run. Kept next to the dispatch it mirrors.
 SUPPORTED_KINDS = ("trigger", "agent", "gate", "wait", "human")
+
+
+def _reject_bad_gate_arms(steps: list[dict]) -> None:
+    """A gate arm's 'when' must be an object; a bare string crashed mid-run."""
+    for step in steps:
+        if kind_of(step) != "gate":
+            continue
+        for arm in config_of(step).get("arms") or []:
+            if not isinstance(arm, dict):
+                continue
+            when = arm.get("when")
+            if when is not None and not isinstance(when, dict):
+                raise WorkflowGraphError(
+                    f"step {step.get('id')!r}: gate arm {arm.get('id')!r} has a "
+                    f"{type(when).__name__} 'when' ({when!r}); expected an object "
+                    "like {'mode': 'all-pass'} or {'mode': 'prose', 'source': ...}"
+                )
+
+
+def _reject_deadlocked_back_edges(scenario: dict, steps: list[dict]) -> None:
+    """A back-edge that is not marked as a loop is an unsatisfiable dependency.
+
+    Draw gate -> check to express rework and forget ``"loop": True`` and check
+    gains a predecessor that only ever runs after check itself. The run then
+    sits until the readiness sweep gives up with 'never became ready', which
+    names the symptom and hides the cause. Cheap to catch here, ugly at 3am.
+    """
+    ids = [s["id"] for s in steps]
+    order = {node_id: i for i, node_id in enumerate(ids)}
+    reachable: dict[str, set[str]] = {node_id: set() for node_id in ids}
+
+    # Forward reachability over non-loop edges only.
+    for _ in range(len(ids)):
+        changed = False
+        for edge in scenario.get("edges") or []:
+            if edge.get("loop"):
+                continue
+            src, dst = edge.get("source"), edge.get("target")
+            if src not in reachable or dst not in reachable:
+                continue
+            new = {dst} | reachable[dst]
+            if not new <= reachable[src]:
+                reachable[src] |= new
+                changed = True
+        if not changed:
+            break
+
+    for edge in scenario.get("edges") or []:
+        if edge.get("loop"):
+            continue
+        src, dst = edge.get("source"), edge.get("target")
+        if src not in order or dst not in order:
+            continue
+        if src in reachable.get(dst, set()):
+            raise WorkflowGraphError(
+                f"edge {src!r} -> {dst!r} closes a cycle but is not marked as a "
+                f"loop, so {dst!r} waits on a step that only runs after it and "
+                f"the run can never start it. Add \"loop\": true to that edge if "
+                "it is a rework path."
+            )
 
 
 def _reject_unknown_kinds(steps: list[dict]) -> None:
