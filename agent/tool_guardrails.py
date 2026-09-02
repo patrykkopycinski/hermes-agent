@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from utils import safe_json_loads
-from agent.tool_result_classification import file_mutation_result_landed
+from agent.tool_result_classification import (
+    DUPLICATE_OUTPUT_MARKER_PREFIX,
+    file_mutation_result_landed,
+)
 
 
 IDEMPOTENT_TOOL_NAMES = frozenset(
@@ -46,7 +49,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "execute_code",
         "write_file",
         "patch",
-        "todo",
+        "todo_list",
         "memory",
         "skill_manage",
         "browser_click",
@@ -55,9 +58,9 @@ MUTATING_TOOL_NAMES = frozenset(
         "browser_scroll",
         "browser_navigate",
         "send_message",
-        "cronjob",
+        "cronjob_manage",
         "delegate_task",
-        "process",
+        "process_manage",
     }
 )
 
@@ -69,8 +72,7 @@ MUTATING_TOOL_NAMES = frozenset(
 # unannotated.
 STALL_GUARD_REPEATABLE_TOOLS = frozenset(
     {
-        "process",
-        "bfl_flux3_get_result",
+        "process_manage",
     }
 )
 
@@ -101,6 +103,49 @@ IDENTICAL_RESULT_STUB_MIN_CHARS = 512
 _RESULT_STUB_ARGS_PREVIEW_CHARS = 120
 
 
+# Tools whose "failure" is a normal, informative outcome of legitimate work:
+# a red test run, a grep with no matches, a failing build during a fix loop, a
+# page that times out. Hard stops never fire on these from failure counts of
+# DIFFERENT commands (same_tool_failure) — only an exact-args replay with NO
+# intervening change, or an identical-result streak, can halt them.
+FAILURE_TOLERANT_TOOL_NAMES = frozenset(
+    {
+        "terminal",
+        "execute_code",
+        "process_manage",
+        "process",
+        "browser_navigate",
+        "web_extract",
+    }
+)
+
+# A landed mutation between two attempts means the retry is a NEW experiment
+# (edit -> re-run) rather than a replay. A successful call to one of these
+# marks progress for every failing signature still being counted this turn.
+PROGRESS_RESET_TOOL_NAMES = frozenset(
+    {
+        "write_file",
+        "patch",
+        "terminal",
+        "execute_code",
+        "browser_click",
+        "browser_type",
+        "browser_press",
+        "browser_navigate",
+        "process_manage",
+        "process",
+        "delegate_task",
+        "send_message",
+        "cronjob",
+        "cronjob_manage",
+        "todo",
+        "todo_list",
+        "memory",
+        "skill_manage",
+    }
+)
+
+
 def is_stall_guard_repeatable(tool_name: str) -> bool:
     """Whether a tool is exempt from the identical-call loop notice."""
     if tool_name in STALL_GUARD_REPEATABLE_TOOLS:
@@ -108,24 +153,19 @@ def is_stall_guard_repeatable(tool_name: str) -> bool:
     return tool_name.endswith(_STALL_GUARD_REPEATABLE_SUFFIXES)
 
 
-# Successful writes are not generally safe to classify as no-progress from
-# their output alone: an identical terminal/process result may still represent
-# a real side effect. ``todo`` is the narrow exception because the tool returns
-# its complete in-memory state after every call.
-NO_PROGRESS_STATE_TOOL_NAMES = frozenset({"todo"})
-
-
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
     """Thresholds for per-turn tool-call loop detection.
 
     Warnings are enabled by default and never prevent tool execution. Hard stops
-    are explicit opt-in so interactive CLI/TUI sessions get a gentle nudge unless
-    the user enables circuit-breaker behavior in config.yaml.
+    stay opt-in for interactive CLI/TUI/Desktop/ACP sessions, but default on for
+    non-interactive gateway/cron platforms where nobody is present to interrupt
+    a model that ignores loop warnings.
     """
 
     warnings_enabled: bool = True
     hard_stop_enabled: bool = False
+    non_interactive_hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
     same_tool_failure_warn_after: int = 3
@@ -137,10 +177,15 @@ class ToolCallGuardrailConfig:
     loop_caps: "LoopCapConfig" = field(default_factory=lambda: LoopCapConfig())
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any] | None) -> "ToolCallGuardrailConfig":
+    def from_mapping(
+        cls,
+        data: Mapping[str, Any] | None,
+        *,
+        platform: str | None = None,
+    ) -> "ToolCallGuardrailConfig":
         """Build config from the `tool_loop_guardrails` config.yaml section."""
         if not isinstance(data, Mapping):
-            return cls()
+            data = {}
 
         warn_after = data.get("warn_after")
         if not isinstance(warn_after, Mapping):
@@ -150,9 +195,18 @@ class ToolCallGuardrailConfig:
             hard_stop_after = {}
 
         defaults = cls()
+        hard_stop_enabled = _as_bool(data.get("hard_stop_enabled"), defaults.hard_stop_enabled)
+        non_interactive_hard_stop_enabled = _as_bool(
+            data.get("non_interactive_hard_stop_enabled"),
+            defaults.non_interactive_hard_stop_enabled,
+        )
+        if _is_non_interactive_platform(platform) and non_interactive_hard_stop_enabled:
+            hard_stop_enabled = True
+
         return cls(
             warnings_enabled=_as_bool(data.get("warnings_enabled"), defaults.warnings_enabled),
-            hard_stop_enabled=_as_bool(data.get("hard_stop_enabled"), defaults.hard_stop_enabled),
+            hard_stop_enabled=hard_stop_enabled,
+            non_interactive_hard_stop_enabled=non_interactive_hard_stop_enabled,
             exact_failure_warn_after=_positive_int(
                 warn_after.get("exact_failure", data.get("exact_failure_warn_after")),
                 defaults.exact_failure_warn_after,
@@ -228,6 +282,25 @@ class LoopCapConfig:
         )
 
 
+_INTERACTIVE_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp"})
+
+# Platforms that are not chat gateways but whose work is a bounded, supervised
+# task loop: a subagent inherits its parent's budget and is stopped by the
+# parent; api_server runs have a live client holding the request. Both do
+# real edit -> re-run work, so they keep the interactive (warn-only) default.
+_SUPERVISED_TASK_PLATFORMS = frozenset({"subagent", "api_server"})
+
+
+def _is_non_interactive_platform(platform: str | None) -> bool:
+    """Return true for gateway/cron sessions where tool loops are unattended."""
+    if not isinstance(platform, str) or not platform.strip():
+        return False
+    key = platform.strip().lower()
+    if key in _INTERACTIVE_PLATFORMS or key in _SUPERVISED_TASK_PLATFORMS:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class IdenticalCallObservation:
     """Outcome of observing one completed tool call for the stall guards.
@@ -252,7 +325,7 @@ class ToolCallSignature:
 
     @classmethod
     def from_call(cls, tool_name: str, args: Mapping[str, Any] | None) -> "ToolCallSignature":
-        canonical = canonical_tool_args(normalize_tool_args_for_guardrail(tool_name, args or {}))
+        canonical = canonical_tool_args(args or {})
         return cls(tool_name=tool_name, args_hash=_sha256(canonical))
 
     def to_metadata(self) -> dict[str, str]:
@@ -292,28 +365,37 @@ class ToolGuardrailDecision:
         return data
 
 
-def normalize_tool_args_for_guardrail(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a loop-detection view of args with no-op jitter removed.
+def is_no_progress_marker_result(result: Any) -> bool:
+    """Whether a result explicitly states its content is unchanged.
 
-    This is deliberately conservative. It only normalizes tool payloads where
-    the repeated-call semantics are declarative and stable. Shell commands,
-    browser input, and arbitrary mutating tools keep their raw canonical args.
+    Three emitters produce such a marker, and all three establish identity by
+    comparison rather than by guess, so the marker is *evidence* of an
+    unchanged read rather than a heuristic about one:
+
+    * ``agent.context_compressor._prune_old_tool_results`` replaces an older
+      byte-identical tool result with ``[Duplicate tool output — ...]`` after
+      matching content hashes.
+    * ``tools.file_tools.read_file`` returns a ``dedup`` envelope after
+      confirming the file's mtime is unchanged since the served read.
+    * ``tools.skills_tool.skill_view`` returns the same envelope shape after
+      confirming (mtime_ns, size) is unchanged.
+
+    Loop detection keys on result identity, and these markers are deliberately
+    *not* byte-identical to the payload they stand in for. Without this
+    predicate an alternating full/marker sequence reads as a changed result on
+    every other call, so the streak restarts forever and never reaches a
+    threshold — the measured hole this predicate closes.
     """
-    normalized = dict(args)
-
-    if tool_name == "skill_view":
-        if normalized.get("file_path") is None:
-            normalized.pop("file_path", None)
-        return normalized
-
-    if tool_name == "read_file":
-        if normalized.get("offset") in (None, 1):
-            normalized.pop("offset", None)
-        if normalized.get("limit") in (None, 2000):
-            normalized.pop("limit", None)
-        return normalized
-
-    return normalized
+    if not isinstance(result, str):
+        return False
+    if result.lstrip().startswith(DUPLICATE_OUTPUT_MARKER_PREFIX):
+        return True
+    parsed = safe_json_loads(result)
+    return bool(
+        isinstance(parsed, dict)
+        and parsed.get("dedup") is True
+        and parsed.get("content_returned") is False
+    )
 
 
 def canonical_tool_args(args: Mapping[str, Any]) -> str:
@@ -371,25 +453,12 @@ class ToolCallGuardrailController:
         self.config = config or ToolCallGuardrailConfig()
         self.reset_for_turn()
 
-    def reset_for_turn(self, *, new_user_input: bool = True) -> None:
-        """Reset per-turn counters.
-
-        ``new_user_input`` distinguishes a genuine new user request from an
-        internal turn restart (context compaction, preflight). Only a real user
-        message clears the no-progress streaks: a compaction-triggered restart
-        that cleared them would let a bookkeeping loop spanning the compaction
-        restart its streak at 1 on every lap and never reach
-        ``no_progress_block_after`` — which is exactly how the 2026-08-19
-        twenty-turn skill-reload loop stayed invisible to this controller.
-        """
+    def reset_for_turn(self) -> None:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
-        if new_user_input or not hasattr(self, "_no_progress"):
-            # A new user request is a legitimate reason to re-read a stable
-            # resource, so one user's completed request must not poison a
-            # later, independent one. Streaks are otherwise cleared when the
-            # world actually moves (see ``note_progress``).
-            self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        # signature -> a mutating call succeeded since its last failure
+        self._progress_since_failure: dict[ToolCallSignature, bool] = {}
+        self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call loop-breaker state (agent.stall_guards): tracks the
         # CONSECUTIVE streak of identical (tool, canonical args) calls whose
@@ -438,6 +507,10 @@ class ToolCallGuardrailController:
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
         exact_count = self._exact_failure_counts.get(signature, 0)
+        if self._progress_since_failure.get(signature):
+            # Something landed since this call last failed — let it run; the
+            # streak restarts in after_call if it fails again.
+            exact_count = 0
         if exact_count >= self.config.exact_failure_block_after:
             decision = ToolGuardrailDecision(
                 action="block",
@@ -454,25 +527,25 @@ class ToolCallGuardrailController:
             self._halt_decision = decision
             return decision
 
-        record = self._no_progress.get(signature)
-        if record is not None:
-            _result_hash, repeat_count = record
-            if repeat_count >= self.config.no_progress_block_after:
-                decision = ToolGuardrailDecision(
-                    action="block",
-                    code="no_progress_block",
-                    message=(
-                        f"Blocked {tool_name}: this call returned no-progress "
-                        f"{repeat_count} times with identical arguments. Stop "
-                        "repeating it unchanged; use the result already provided "
-                        "or change the approach."
-                    ),
-                    tool_name=tool_name,
-                    count=repeat_count,
-                    signature=signature,
-                )
-                self._halt_decision = decision
-                return decision
+        if self._is_idempotent(tool_name):
+            record = self._no_progress.get(signature)
+            if record is not None:
+                _result_hash, repeat_count = record
+                if repeat_count >= self.config.no_progress_block_after:
+                    decision = ToolGuardrailDecision(
+                        action="block",
+                        code="idempotent_no_progress_block",
+                        message=(
+                            f"Blocked {tool_name}: this read-only call returned the same "
+                            f"result {repeat_count} times. Stop repeating it unchanged; "
+                            "use the result already provided or try a different query."
+                        ),
+                        tool_name=tool_name,
+                        count=repeat_count,
+                        signature=signature,
+                    )
+                    self._halt_decision = decision
+                    return decision
 
         return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
@@ -490,6 +563,12 @@ class ToolCallGuardrailController:
             failed, _ = classify_tool_failure(tool_name, result)
 
         if failed:
+            # An identical failing call is only a REPLAY if nothing landed in
+            # between. If any mutating call succeeded since the previous
+            # identical failure (edit -> re-run pytest, click -> re-snapshot),
+            # the retry is a new experiment: restart the exact-args streak.
+            if self._progress_since_failure.pop(signature, False):
+                self._exact_failure_counts.pop(signature, None)
             exact_count = self._exact_failure_counts.get(signature, 0) + 1
             self._exact_failure_counts[signature] = exact_count
             self._no_progress.pop(signature, None)
@@ -497,7 +576,17 @@ class ToolCallGuardrailController:
             same_count = self._same_tool_failure_counts.get(tool_name, 0) + 1
             self._same_tool_failure_counts[tool_name] = same_count
 
-            if self.config.hard_stop_enabled and same_count >= self.config.same_tool_failure_halt_after:
+            # same_tool_failure counts DIFFERENT args on one tool. For tools
+            # whose non-zero exit is ordinary work output (terminal,
+            # execute_code, pollers) a run of distinct red commands is
+            # diagnosis, not a loop — warn, never halt. The exact-args replay
+            # path still applies to them.
+            same_tool_halt_eligible = tool_name not in FAILURE_TOLERANT_TOOL_NAMES
+            if (
+                self.config.hard_stop_enabled
+                and same_tool_halt_eligible
+                and same_count >= self.config.same_tool_failure_halt_after
+            ):
                 decision = ToolGuardrailDecision(
                     action="halt",
                     code="same_tool_failure_halt",
@@ -541,19 +630,17 @@ class ToolCallGuardrailController:
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
 
-        if file_mutation_result_landed(tool_name, result or ""):
-            # A write actually landed on disk: the world moved, so every
-            # carried-over no-progress streak is stale. Membership in
-            # ``mutating_tools`` is not sufficient evidence here — bookkeeping
-            # tools such as ``todo`` live in that set but change nothing.
-            self.note_progress()
-            return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
+        # A successful mutation is progress for every failing signature still
+        # being counted this turn: the next identical retry runs against
+        # changed state, so it is a fresh attempt rather than a replay. Pure
+        # loops never mutate anything between attempts, so the replay detector
+        # keeps its teeth.
+        if tool_name in PROGRESS_RESET_TOOL_NAMES or file_mutation_result_landed(tool_name, result):
+            for sig in list(self._exact_failure_counts):
+                self._progress_since_failure[sig] = True
+            self._same_tool_failure_counts.clear()
 
-        # Arbitrary mutating tools cannot be classified from their output:
-        # repeating a terminal/process call may have a real side effect even
-        # when stdout is byte-identical. Track read-only calls plus the narrow
-        # state-returning ``todo`` tool only.
-        if not self._is_idempotent(tool_name) and tool_name not in NO_PROGRESS_STATE_TOOL_NAMES:
+        if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
@@ -561,22 +648,27 @@ class ToolCallGuardrailController:
         previous = self._no_progress.get(signature)
         repeat_count = 1
         if previous is not None and (
-            previous[0] == result_hash or _is_explicit_no_progress_result(result)
+            previous[0] == result_hash or is_no_progress_marker_result(result)
         ):
-            # A dedup stub is explicit evidence that the underlying result is
-            # unchanged even though its envelope hashes differently. Every
-            # other changed result is progress and restarts the streak.
+            # An unchanged-marker result is positive evidence that the payload
+            # did not change, even though the marker's own hash differs from
+            # the payload it stands in for. Without this, an alternating
+            # payload/marker sequence restarts the streak on every other call
+            # and never reaches a threshold. The marker is kept OUT of the
+            # stored hash below so the streak survives the alternation.
             repeat_count = previous[1] + 1
+            if is_no_progress_marker_result(result):
+                result_hash = previous[0]
         self._no_progress[signature] = (result_hash, repeat_count)
 
         if self.config.warnings_enabled and repeat_count >= self.config.no_progress_warn_after:
             return ToolGuardrailDecision(
                 action="warn",
-                code="no_progress_warning",
+                code="idempotent_no_progress_warning",
                 message=(
-                    f"{tool_name} made no progress {repeat_count} times with "
-                    "identical arguments. Use the result already provided "
-                    "or change the approach instead of repeating it unchanged."
+                    f"{tool_name} returned the same result {repeat_count} times. "
+                    "Use the result already provided or change the query instead of "
+                    "repeating it unchanged."
                 ),
                 tool_name=tool_name,
                 count=repeat_count,
@@ -584,14 +676,6 @@ class ToolCallGuardrailController:
             )
 
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
-
-    def note_progress(self) -> None:
-        """Clear no-progress streaks because the world actually moved.
-
-        Called when a mutating tool succeeds. Repeating a read after a real
-        write is progress, so the carried-over counters must not block it.
-        """
-        self._no_progress.clear()
 
     def _is_idempotent(self, tool_name: str) -> bool:
         if tool_name in self.config.mutating_tools:
@@ -650,6 +734,19 @@ class ToolCallGuardrailController:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
         result_hash = _result_hash(result) if is_plain_str else ""
 
+        # An unchanged-marker result stands in for the payload it replaced, so
+        # for streak purposes it IS the previous result. Continuing the streak
+        # on the previous hash keeps an alternating payload/marker sequence
+        # counted as one streak instead of restarting it on every other call.
+        marker_continues_streak = (
+            is_plain_str
+            and self._identical_streak_sig == signature
+            and self._identical_streak_count > 0
+            and is_no_progress_marker_result(result)
+        )
+        if marker_continues_streak:
+            result_hash = self._identical_streak_result_hash
+
         if (
             is_plain_str
             and self._identical_streak_sig == signature
@@ -678,6 +775,31 @@ class ToolCallGuardrailController:
                 "Do not repeat it — change arguments, use a different tool, or "
                 "proceed with what you have.]"
             )
+            # Hard-stop widening (#89069 / #100849 bundle): the per-turn
+            # no-progress BLOCK above only covers tools in idempotent_tools, so
+            # a model replaying the same successful `terminal`/`skill_view`
+            # call with a byte-identical result ran until the iteration budget.
+            # The consecutive-identical streak is tool-agnostic; when hard
+            # stops are enabled, halt at the same idempotent_no_progress
+            # threshold. Pollers stay exempt (an unchanged poll is progress).
+            if (
+                self.config.hard_stop_enabled
+                and count >= self.config.no_progress_block_after
+                and self._halt_decision is None
+            ):
+                self._halt_decision = ToolGuardrailDecision(
+                    action="halt",
+                    code="identical_call_streak_halt",
+                    message=(
+                        f"Stopped {tool_name}: the same call with identical arguments "
+                        f"returned the same result {count} times in a row. Stop "
+                        "repeating it unchanged; use the result already provided or "
+                        "change strategy."
+                    ),
+                    tool_name=tool_name,
+                    count=count,
+                    signature=signature,
+                )
 
         stub = None
         if (
@@ -861,21 +983,6 @@ def _result_hash(result: str | None) -> str:
     else:
         canonical = result or ""
     return _sha256(canonical)
-
-
-def _is_explicit_no_progress_result(result: str | None) -> bool:
-    """Return whether a result explicitly denotes a duplicate/unchanged read."""
-    if not isinstance(result, str):
-        return False
-    if result.lstrip().startswith("[Duplicate tool output"):
-        return True
-    parsed = safe_json_loads(result)
-    return bool(
-        isinstance(parsed, dict)
-        and parsed.get("status") == "unchanged"
-        and parsed.get("dedup") is True
-        and parsed.get("content_returned") is False
-    )
 
 
 def _as_bool(value: Any, default: bool) -> bool:
