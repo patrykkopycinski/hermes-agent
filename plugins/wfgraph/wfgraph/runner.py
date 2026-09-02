@@ -403,6 +403,11 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
     leftover = [node_id for node_id in state["queue"] if node_id not in state["ran"]]
     if leftover and not state.get("failed"):
         state["failed"] = True
+        _record_failure(
+            state,
+            leftover[0],
+            f"never became ready (still waiting on {', '.join(leftover)})",
+        )
         emit(
             state,
             "NodeFailed",
@@ -741,6 +746,7 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
         cap = int(config_of(step).get("maxLoops") or 5)
         if state["loops"] >= cap:
             emit(state, "NodeFailed", {"nodeId": node_id, "iteration": iteration, "error": f"gave up after {cap} takes"})
+            _record_failure(state, node_id, f"gave up after {cap} takes")
             state["failed"] = True
             return [], True
         state["loops"] += 1
@@ -776,6 +782,21 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
         return [route], False
 
     return [route], False
+
+
+def _record_failure(state: dict, node_id: str, error: str) -> None:
+    """Persist why a step failed onto the run record itself.
+
+    ``emit`` publishes to the live event stream, which is gone by the time a
+    cron or webhook run is inspected on disk. Without this the stored run says
+    ``failed`` with no reason, which is unactionable in production.
+    """
+    entry = {"nodeId": node_id, "error": error}
+    errors = state.setdefault("errors", [])
+    if isinstance(errors, list):
+        errors.append(entry)
+    if not state.get("error"):
+        state["error"] = f"{node_id}: {error}"
 
 
 def _compute_agent(
@@ -845,6 +866,10 @@ def _apply_agent(state: dict, step: dict, iteration: int, result: dict) -> str:
     if not result.get("ok", True):
         error = str(result.get("error") or "step failed")
         emit(state, "NodeFailed", {"nodeId": node_id, "iteration": iteration, "error": error})
+        # emit() only reaches the live event stream. A cron or webhook run is
+        # read back from disk long after that stream is gone, so the reason has
+        # to live on the run record or the operator sees "failed" and nothing.
+        _record_failure(state, node_id, error)
         from wfgraph.agent import is_user_fixable
 
         if is_user_fixable(error):
