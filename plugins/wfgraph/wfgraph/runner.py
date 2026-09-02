@@ -184,6 +184,7 @@ def start_run(
                 live["status"] = "failed"
                 live["failed"] = True
                 live["pauseRequested"] = False
+                _attach_receipt(live)
                 save_run(live)
                 emit(live, "RunFinished", {"state": "failed", "error": str(exc)})
             raise
@@ -421,9 +422,60 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
         )
 
     state["status"] = "failed" if state.get("failed") else "succeeded"
+    _attach_receipt(state)
     save_run(state)
     emit(state, "RunFinished", {"state": "failed" if state.get("failed") else "succeeded"})
     return load_run(run_id) or state
+
+
+# Borrowed from Limen's job record, which stores `state = done` for a job and
+# says plainly that done means the process ended cleanly -- not that the work is
+# correct or the branch is safe to merge. Its coordinator still reads the
+# record, the diff, and the checks before merging.
+#
+# wfgraph used to stop at `status = "succeeded"`, which is the process outcome
+# wearing the costume of a verdict. A graph whose agent returned ok with an
+# empty summary finished every node and reported green; a cron operator reading
+# the stored run had no finish time and nothing to check the claim against.
+#
+# The receipt keeps those two ideas apart on the record itself:
+#   state     -- the process outcome, the same fact `status` carries
+#   verified  -- always False here; nothing in the engine judges the work
+#   evidence  -- did any node actually produce output, or did it just run
+#   meaning   -- the caveat in the record, for whoever reads it without docs
+def _attach_receipt(state: dict) -> None:
+    """Stamp the finish record used by cron, webhooks, and the status tool."""
+    finished_at = int(time.time() * 1000)
+    started_at = int(state.get("startedAt") or finished_at)
+    ran = state.get("ran") or []
+    summaries = state.get("summaries") or {}
+    outputs = state.get("outputs") or {}
+
+    produced = any(str(v or "").strip() for v in summaries.values())
+    if not produced:
+        # outputs values are structured ({"text": ...}), so stringifying the
+        # container is always truthy -- look at the payload, not the wrapper.
+        for value in outputs.values():
+            if isinstance(value, dict):
+                if any(str(inner or "").strip() for inner in value.values()):
+                    produced = True
+                    break
+            elif str(value or "").strip():
+                produced = True
+                break
+
+    state["receipt"] = {
+        "state": "failed" if state.get("failed") else "done",
+        "finishedAt": finished_at,
+        "durationMs": max(0, finished_at - started_at),
+        "nodesRan": len(ran),
+        "evidence": bool(produced),
+        "verified": False,
+        "meaning": (
+            "The run ended cleanly. This does NOT mean the work is correct "
+            "or complete -- read the outputs and checks before acting on it."
+        ),
+    }
 
 
 def _run_trigger(state: dict, step: dict, iteration: int) -> None:
