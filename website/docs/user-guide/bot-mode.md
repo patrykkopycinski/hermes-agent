@@ -83,7 +83,8 @@ Groups are standalone rows in the same activity-ordered roster as Bot DMs. A Bot
 
 **Open chat** on any group row (2–6 Bots) opens a shared room where the whole group coordinates:
 
-- Your message triggers up to **three serial rounds** of member turns. @-mentioned Bots respond (everyone responds when nobody is mentioned); each Bot replies briefly or passes, and the room settles when a full round stays silent.
+- Your message triggers up to **three rounds** of member turns. Within a round every responding Bot thinks **at the same time**, so a room of five answers about as fast as one; rounds run in sequence so each Bot sees what the others just said before it speaks again. @-mentioned Bots respond (everyone responds when nobody is mentioned); each Bot replies briefly or passes, and the room settles when a full round stays silent.
+- Replies land the moment a Bot finishes — the room listens for each member session's completion event rather than polling on a timer (a slow 5s poll remains as a backstop for older gateways).
 - Bots pull each other in with `@name`, and escalate real judgment calls to you with `@user` — the group row shows a **needs you** badge when that happens.
 - Hard caps (10 messages per send, 3 rounds) keep rooms from spinning.
 - Each member keeps its own persistent `Group: <name>` session, so room context survives like any other conversation.
@@ -134,13 +135,32 @@ hermes peer add spark --url http://spark.lan:8377 --key <API_SERVER_KEY>
 hermes peer list
 hermes peer dm spark < /tmp/dm.txt        # message body from a file (nothing shell-interpreted)
 hermes peer dm spark/researcher < /tmp/dm.txt   # named profile on a multiplexed peer
+hermes peer run spark --idempotency-key ticket-123 < /tmp/long-task.txt
+hermes peer status spark run_abc123
+hermes peer stop spark run_abc123
 ```
 
 `hermes peer dm` delivers into the remote agent's canonical Bot Chat over the peer's existing API server, runs one agent turn there, and prints the reply on stdout — the exact cross-machine twin of the local `hermes -p <bot> chat` command.
 
+Use `peer dm` only for short queries and receipts because it holds one HTTP
+connection until the turn finishes. For a long turn, `peer run` returns a
+`run_id` immediately; poll it with `peer status`. The run inherits the
+canonical Bot Chat transcript, and a stable `--idempotency-key` makes a retry
+return the original run instead of starting duplicate work. Use `peer stop`
+with that exact run ID to interrupt it without targeting another turn.
+
 Once a peer is registered, the messaging protocol taught to every Bot Chat (`agent.bot_mode_protocol`) automatically includes the peer roster, and `message_agent` accepts peer targets directly — `message_agent(target="spark/researcher", …)`, or `target="spark"` for the peer's main agent — so **your bots learn on their own** that teammates exist on other machines and how to reach them. Registering or removing a peer refreshes each Bot Chat's protocol on its next message (capability epoch).
 
 Requirements: the peer machine runs the `api_server` gateway platform with a strong `API_SERVER_KEY`; reachability is your network's business (LAN, Tailscale, VPN). The key is a credential and lives in `~/.hermes/.env` as `HERMES_PEER_<NAME>_KEY`; peer names/URLs live in `config.yaml` under `bot_peers`.
+
+:::note One-way reachability (NAT)
+Cross-gateway links are direct gateway-to-gateway connections — Desktop is a
+viewer, not a relay. A gateway behind home NAT can dial out to a public peer
+(laptop → VPS works), but the reverse direction has no inbound route
+(VPS → home fails) unless your network provides one. If your Group Chat spans
+a NAT boundary, put the room's authority on the host every participant can
+reach (typically the public VPS), or bridge the network with Tailscale/VPN.
+:::
 
 ## Bots across machines
 
