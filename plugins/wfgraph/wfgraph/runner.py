@@ -265,7 +265,9 @@ def advance(run_id: str, *, execute_fn: ExecuteFn | None = None) -> dict:
 
 
 def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
-    state = load_run(run_id)
+    # Adopting, not reporting: an abandoned run is exactly what this path
+    # recovers, so it must see the raw record rather than a reaped one.
+    state = load_run(run_id, reap_orphans=False)
     if state is None:
         raise ValueError(f"No run '{run_id}'.")
     if state.get("status") in {"succeeded", "failed", "cancelled"}:
