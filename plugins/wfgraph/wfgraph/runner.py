@@ -157,6 +157,7 @@ def start_run(
     if fake:
         state["fake"] = True
     steps = steps_of(scenario)
+    _reject_malformed_structure(scenario, steps)
     _reject_unknown_kinds(steps)
     _reject_bad_gate_arms(steps)
     _reject_deadlocked_back_edges(scenario, steps)
@@ -479,6 +480,60 @@ class WorkflowGraphError(ValueError):
 # report "succeeded" having done nothing at all — a typo in `kind` read as a
 # green run. Kept next to the dispatch it mirrors.
 SUPPORTED_KINDS = ("trigger", "agent", "gate", "wait", "human")
+
+
+def _reject_malformed_structure(scenario: dict, steps: list[dict]) -> None:
+    """Structural checks that must pass before a run is worth starting.
+
+    Each of these previously produced a run reporting "succeeded": an empty
+    graph and an id-less step executed nothing, duplicate ids executed twice
+    under one name and clobbered each other's per-node state, and an edge to a
+    nonexistent node silently dropped a branch. Success is the worst available
+    answer for all four - anything watching run status reads it as healthy.
+
+    Reads scenario["steps"] raw rather than the filtered list: steps_of drops
+    anything without an id (topology.py), which is exactly one of the cases
+    that has to be caught rather than tolerated.
+    """
+    raw_steps = scenario.get("steps") or []
+
+    for index, step in enumerate(raw_steps):
+        if not isinstance(step, dict):
+            raise WorkflowGraphError(
+                f"step at position {index} is a {type(step).__name__}, not an object"
+            )
+        step_id = step.get("id")
+        if not step_id or not str(step_id).strip():
+            raise WorkflowGraphError(
+                f"step at position {index} has no 'id'; every step needs one "
+                "because the engine keys sessions, retries and summaries by it"
+            )
+
+    if not steps:
+        raise WorkflowGraphError(
+            "workflow has no steps; there is nothing to run"
+        )
+
+    seen: set[str] = set()
+    for step in steps:
+        step_id = str(step["id"])
+        if step_id in seen:
+            raise WorkflowGraphError(
+                f"duplicate step id {step_id!r}; ids must be unique because "
+                "per-node state (sessions, tries, summaries) is keyed by them"
+            )
+        seen.add(step_id)
+
+    for edge in scenario.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        for end in ("source", "target"):
+            node = edge.get(end)
+            if node is not None and str(node) not in seen:
+                raise WorkflowGraphError(
+                    f"edge {edge.get('id') or ''!r} names {end} {str(node)!r}, "
+                    "which is not a step in this workflow"
+                )
 
 
 def _reject_bad_gate_arms(steps: list[dict]) -> None:
