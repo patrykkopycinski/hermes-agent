@@ -763,6 +763,16 @@ def _compute_agent(
         )
     else:
         result = execute_fn(goal, context, state.get("payload"), cfg)
+    if not isinstance(result, dict):
+        # execute_fn reaches a live model in production, and the code around it
+        # returns junk sometimes - None on a swallowed timeout, a bare string
+        # from a mis-wired provider shim. Left alone this surfaced deeper in as
+        # "AttributeError: 'NoneType' object has no attribute 'get'": a
+        # traceback pointing at engine internals for an agent-side fault.
+        raise TypeError(
+            f"step {node_id!r}: agent returned {type(result).__name__}, "
+            f"expected a dict like {{'ok': True, 'verdict': 'PASS'}} (got {result!r})"
+        )
     if traces:
         result = {**result, "_traces": traces}
     return result
