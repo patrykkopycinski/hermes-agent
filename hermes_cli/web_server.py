@@ -19408,14 +19408,26 @@ def _start_parent_death_watchdog() -> None:
     Desktop versions that provide only ``HERMES_PARENT_PID`` retain PID-only
     tracking.
     """
-    # Never arm under pytest.  The watchdog's whole job is to os._exit(0) the
-    # process it runs in, which under a test runner means killing the runner:
-    # the suite stops mid-file, pytest never reaches sessionfinish, no summary
-    # or --junit-xml is written, and the shell still sees exit 0 — a passing
-    # run that executed a fraction of the tests.  A test process inherits
-    # HERMES_PARENT_PID from whatever launched it, so any test calling
-    # start_server() would otherwise arm a killer aimed at an unrelated parent.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    # Never arm inside a pytest RUNNER process.  The watchdog's terminal
+    # action is os._exit(0); in the runner that kills the run itself: the
+    # suite stops mid-file, sessionfinish never fires, no summary and no
+    # --junit-xml are written, and the shell still sees exit 0 — a truncated
+    # run indistinguishable from a green one.  A test process inherits
+    # HERMES_PARENT_PID from whatever launched it, so any in-process test
+    # reaching start_server() would otherwise aim a killer at an unrelated
+    # parent.
+    #
+    # Both conditions are required, and the sys.modules half is the load
+    # bearing one.  PYTEST_CURRENT_TEST is exported into the environment and
+    # therefore INHERITED by subprocess children: a production-shaped
+    # `hermes serve` spawned from an integration test carries it even when
+    # the caller scrubs the HERMES_PARENT_* family (as
+    # tests/hermes_cli/test_serve_port_in_use.py does), so an env-only guard
+    # would silently disarm the watchdog in exactly the child processes whose
+    # lifecycle contract we are supposed to be testing.  `pytest` in
+    # sys.modules is per-interpreter and never crosses a process boundary, so
+    # it distinguishes "I am the runner" from "my ancestor was a runner".
+    if "pytest" in sys.modules and os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
     raw_pid = os.environ.get("HERMES_PARENT_PID")
