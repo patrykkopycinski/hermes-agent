@@ -17,7 +17,7 @@ DOC = {
     "scenario": {
         "steps": [
             {"id": "t", "kind": "trigger", "title": "t"},
-            {"id": "w", "kind": "task", "title": "w", "prompt": "do"},
+            {"id": "w", "kind": "agent", "title": "w", "prompt": "do"},
         ],
         "edges": [{"source": "t", "target": "w"}],
     },
@@ -56,15 +56,22 @@ def test_read_of_a_missing_workflow_is_an_error_not_an_empty_doc(home):
 
 
 def test_run_with_wait_walks_the_graph_and_reports_terminal_state(home, monkeypatch):
-    import wfgraph.runner as runner
+    # set_execute_fn is the real hook. The previous monkeypatch targeted
+    # runner.execute_node, which does not exist -- with raising=False it was a
+    # silent no-op, so this test never actually stubbed the agent.
+    from wfgraph.runner import set_execute_fn
 
-    monkeypatch.setattr(runner, "execute_node", lambda *a, **k: {"text": "ok"}, raising=False)
+    set_execute_fn(lambda *a, **k: {"ok": True, "summary": "ok", "verdict": "PASS", "output": {}})
+    try:
+        out = call(action="run", workflow="acts", wait=True)
+    finally:
+        set_execute_fn(None)  # module-level global: leaking it poisons later tests
 
-    out = call(action="run", workflow="acts", wait=True)
     assert "error" not in out, out
-    blob = json.dumps(out)
-    # the task node must actually appear -- a result that knows no nodes is hollow
-    assert "w" in blob
+    # The node must actually have RUN. Asserting on a json blob only proved the
+    # scenario was echoed back: with kind "task" (which the engine never
+    # dispatched) this passed while ran == ["t"] and w never executed.
+    assert "w" in (out.get("ran") or []), out
 
 
 def test_status_of_an_unknown_run_is_an_error(home):

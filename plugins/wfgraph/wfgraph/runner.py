@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from wfgraph import fake
+from wfgraph.lease import owner_alive
+from wfgraph.lease import stamp as lease_stamp
 from wfgraph.runtime import (
     absorb_signals,
     clear_signal,
@@ -29,7 +31,6 @@ from wfgraph.runtime import (
     lock_for,
     signal,
     spawn,
-    thread_alive,
 )
 from wfgraph.store import (
     active_run,
@@ -112,6 +113,8 @@ def _fresh_state(workflow_id: str, scenario: dict, payload: Any, source: str, na
         "tries": {},
         "inFlight": [],
         "sessions": {},
+        # Who is driving this run, readable from any process. See wfgraph.lease.
+        "owner": lease_stamp(),
     }
 
 
@@ -141,7 +144,11 @@ def start_run(
     name = (doc or {}).get("name") or workflow_id
     existing = active_run(workflow_id)
     if existing is not None:
-        if existing.get("status") == "running" and not thread_alive(existing["runId"]):
+        # Liveness must be judged by the run's recorded owner, not by this
+        # interpreter's thread registry: a cron tick or webhook process has an
+        # empty registry and would otherwise reap a perfectly healthy run and
+        # start a duplicate alongside it.
+        if existing.get("status") == "running" and not owner_alive(existing):
             fail_dead_run(existing)
         else:
             return existing
@@ -150,6 +157,7 @@ def start_run(
     if fake:
         state["fake"] = True
     steps = steps_of(scenario)
+    _reject_unknown_kinds(steps)
     entries = [s["id"] for s in steps if not preds(scenario, s["id"])]
     if not entries and steps:
         entries = [steps[0]["id"]]
@@ -159,7 +167,21 @@ def start_run(
     if background:
         spawn(state["runId"], execute_fn)
     else:
-        advance(state["runId"], execute_fn=execute_fn)
+        # The inline path is the durable one (cron ticks, webhooks, tests).
+        # spawn() already converts a crash into a failed run; without the same
+        # guard here an exception escapes with the run file still at
+        # "running", leaving a workflow that neither progresses nor finishes.
+        try:
+            advance(state["runId"], execute_fn=execute_fn)
+        except Exception as exc:
+            live = load_run(state["runId"]) or state
+            if live.get("status") not in {"succeeded", "failed", "cancelled"}:
+                live["status"] = "failed"
+                live["failed"] = True
+                live["pauseRequested"] = False
+                save_run(live)
+                emit(live, "RunFinished", {"state": "failed", "error": str(exc)})
+            raise
     return load_run(state["runId"]) or state
 
 
@@ -247,6 +269,14 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
         return state
     if state.get("park"):
         return state
+
+    # Whoever is about to drive this run owns it from here. Without this a run
+    # resumed in a new process would keep the previous process's marker and
+    # read as dead to everyone, including itself.
+    current = lease_stamp()
+    if state.get("owner") != current:
+        state["owner"] = current
+        save_run(state)
 
     fn = execute_fn or _execute_fn
     scenario = state["scenario"]
@@ -434,6 +464,31 @@ class WorkflowGraphError(ValueError):
     """
 
 
+# The kinds _advance actually dispatches. A step of any other kind is never
+# executed and never routes to its successors, so a run containing one used to
+# report "succeeded" having done nothing at all — a typo in `kind` read as a
+# green run. Kept next to the dispatch it mirrors.
+SUPPORTED_KINDS = ("trigger", "agent", "gate", "wait", "human")
+
+
+def _reject_unknown_kinds(steps: list[dict]) -> None:
+    """Fail a malformed graph at start, loudly, instead of running nothing."""
+    unknown = [
+        (str(step.get("id") or "?"), str(kind_of(step) or ""))
+        for step in steps
+        if kind_of(step) not in SUPPORTED_KINDS
+    ]
+    if not unknown:
+        return
+    listed = ", ".join(f"'{node_id}' (kind '{kind}')" for node_id, kind in unknown)
+    raise WorkflowGraphError(
+        f"Unknown step kind in this workflow: {listed}. The engine only runs "
+        f"{', '.join(SUPPORTED_KINDS)}. A step of any other kind is skipped "
+        "silently and its successors never run, so the workflow would report "
+        "success having done nothing. Fix the kind, or remove the step."
+    )
+
+
 def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | None = None) -> tuple[list[str], bool]:
     node_id = step["id"]
     scenario = state["scenario"]
@@ -546,7 +601,18 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
     return [route], False
 
 
-def _compute_agent(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | None) -> dict:
+def _compute_agent(
+    state: dict,
+    step: dict,
+    iteration: int,
+    execute_fn: ExecuteFn | None,
+    session_id: str,
+    resume: bool,
+) -> dict:
+    """Run one agent step. Called from a pool thread under fan-out, so it must
+    treat ``state`` as read-only: the session id and resume flag are decided by
+    the caller on the main thread (see _assign_sessions) precisely so this does
+    no read-modify-write on shared state and never writes the run file."""
     node_id = step["id"]
     cfg = config_of(step)
     goal = str(cfg.get("goal") or "").strip() or title_of(step)
@@ -556,12 +622,6 @@ def _compute_agent(state: dict, step: dict, iteration: int, execute_fn: ExecuteF
     def on_tool(name: str, arg: str = "") -> None:
         traces.append((name, arg))
 
-    sessions = state.setdefault("sessions", {})
-    existing = sessions.get(node_id)
-    session_id = existing or f"wf-{state['runId']}-{node_id}"
-    sessions[node_id] = session_id
-    save_run(state)
-    resume = bool(existing)
     if state.get("fake") and execute_fn is None:
         return fake.play(state, step, iteration)
     if execute_fn is None:
@@ -632,6 +692,27 @@ def _apply_agent(state: dict, step: dict, iteration: int, result: dict) -> str:
     return "ok"
 
 
+def _assign_sessions(state: dict, prepared: list[tuple[dict, int]]) -> dict[str, tuple[str, bool]]:
+    """Claim a session id per node on the main thread, before any worker runs.
+
+    Workers used to do this themselves — ``state.setdefault("sessions", {})``
+    followed by ``save_run(state)`` from inside the pool — an unguarded
+    read-modify-write on a dict being serialized by up to eight threads at
+    once. Deciding here means the pool only ever reads.
+    """
+    sessions = state.setdefault("sessions", {})
+    tries = state.get("tries") or {}
+    plan: dict[str, tuple[str, bool]] = {}
+    for step, _iteration in prepared:
+        node_id = step["id"]
+        existing = sessions.get(node_id)
+        session_id = existing or f"wf-{state['runId']}-{node_id}"
+        sessions[node_id] = session_id
+        plan[node_id] = (session_id, bool(existing) or bool(tries.get(node_id)))
+    save_run(state)
+    return plan
+
+
 def _run_agents(state: dict, steps: list[dict], execute_fn: ExecuteFn | None) -> tuple[list[str], bool]:
     routed: list[str] = []
     halted = False
@@ -655,13 +736,17 @@ def _run_agents(state: dict, steps: list[dict], execute_fn: ExecuteFn | None) ->
         prepared.append((step, iteration))
 
     results: dict[str, dict] = {}
+    plan = _assign_sessions(state, prepared)
     if len(prepared) == 1:
         step, iteration = prepared[0]
-        results[step["id"]] = _compute_agent(state, step, iteration, execute_fn)
+        session_id, resume = plan[step["id"]]
+        results[step["id"]] = _compute_agent(state, step, iteration, execute_fn, session_id, resume)
     else:
         with ThreadPoolExecutor(max_workers=min(8, len(prepared))) as pool:
             futs = {
-                pool.submit(_compute_agent, state, step, iteration, execute_fn): step["id"]
+                pool.submit(
+                    _compute_agent, state, step, iteration, execute_fn, *plan[step["id"]]
+                ): step["id"]
                 for step, iteration in prepared
             }
             for fut in as_completed(futs):
@@ -771,7 +856,9 @@ def request_pause(run_id: str) -> dict:
         return state
     if state.get("park"):
         return state
-    if not thread_alive(run_id):
+    # Same cross-process rule as start_run: a pause request arriving from a
+    # CLI process must not declare the gateway's live run dead.
+    if not owner_alive(state):
         return fail_dead_run(state)
     signal(run_id, "pause")
     state["pauseRequested"] = True
