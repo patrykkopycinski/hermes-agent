@@ -75,6 +75,10 @@ def wfgraph_tool(
                 "verdicts": state.get("verdicts"),
                 "loops": state.get("loops"),
                 "failed": state.get("failed"),
+                # The finish record. `status` is the process outcome; the
+                # receipt says what that outcome does and does not claim, so a
+                # caller polling this does not read "succeeded" as "verified".
+                "receipt": state.get("receipt"),
             },
             ensure_ascii=False,
         )
