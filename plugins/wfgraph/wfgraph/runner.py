@@ -49,6 +49,7 @@ from wfgraph.topology import (
     config_of,
     holds,
     kind_of,
+    parse_wait_seconds,
     preds,
     scenario_of,
     steps_of,
@@ -160,6 +161,7 @@ def start_run(
     _reject_malformed_structure(scenario, steps)
     _reject_unknown_kinds(steps)
     _reject_bad_gate_arms(steps)
+    _reject_unparseable_waits(steps)
     _reject_deadlocked_back_edges(scenario, steps)
     entries = [s["id"] for s in steps if not preds(scenario, s["id"])]
     if not entries and steps:
@@ -534,6 +536,39 @@ def _reject_malformed_structure(scenario: dict, steps: list[dict]) -> None:
                     f"edge {edge.get('id') or ''!r} names {end} {str(node)!r}, "
                     "which is not a step in this workflow"
                 )
+
+
+def _reject_unparseable_waits(steps: list[dict]) -> None:
+    """A timer whose spec cannot be parsed silently became a zero-length wait.
+
+    park_wait falls back to seconds = 0 for anything parse_wait_seconds cannot
+    read (waits.py), so "1 hour", "60" and "abc" all turned a deliberate pause
+    into a no-op and the run sailed straight through. A soak period or a deploy
+    gate written that way looks like it held and never did.
+
+    An empty spec, or no 'until' block at all, stays a legal no-op: nothing was
+    written, so nothing was misread.
+    """
+    for step in steps:
+        if kind_of(step) != "wait":
+            continue
+        until = config_of(step).get("until") or {}
+        if not isinstance(until, dict):
+            raise WorkflowGraphError(
+                f"step {step.get('id')!r}: 'until' is a {type(until).__name__}, "
+                "expected an object like {'type': 'timer', 'spec': '1h'}"
+            )
+        if str(until.get("type") or "timer") != "timer":
+            continue
+        spec = str(until.get("spec") or "").strip()
+        if not spec:
+            continue
+        if parse_wait_seconds(spec) is None:
+            raise WorkflowGraphError(
+                f"step {step.get('id')!r}: cannot read wait duration {spec!r}, "
+                "so it would not wait at all. Use a number and a unit, like "
+                "'30s', '5m', '1h' or '2d'."
+            )
 
 
 def _reject_bad_gate_arms(steps: list[dict]) -> None:
