@@ -91,3 +91,29 @@ def test_event_and_poll_waits_are_untouched(wf_home):
 
     assert state["status"] == "waiting_world"
     assert state["ran"] == ["a"]
+
+
+@pytest.mark.parametrize(
+    "until",
+    [
+        {"kind": "event", "event": "deploy-done"},
+        {"kind": "timer", "spec": "1h"},
+        {"type": "event", "event": "deploy-done"},
+        {"until": "1h"},
+    ],
+)
+def test_an_until_block_with_no_recognised_key_is_rejected(wf_home, until):
+    """A misspelled `until` key is not a wait, it is a zero-second no-op.
+
+    `park_wait` reads `until["type"]` and `until["spec"]`. Anything else
+    defaults type to "timer" with an empty spec, which parses as zero, so the
+    run sails through the pause and reports success. A deploy gate written
+    `{"kind": "event", ...}` never held anything, and nothing said so.
+    """
+    _save(until)
+
+    with pytest.raises(WorkflowGraphError) as excinfo:
+        _start()
+
+    msg = str(excinfo.value)
+    assert "pause" in msg, "name the offending step"

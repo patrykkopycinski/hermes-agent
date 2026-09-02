@@ -558,6 +558,23 @@ def _reject_unparseable_waits(steps: list[dict]) -> None:
                 f"step {step.get('id')!r}: 'until' is a {type(until).__name__}, "
                 "expected an object like {'type': 'timer', 'spec': '1h'}"
             )
+        # park_wait only ever reads 'type' and 'spec'. An until block written
+        # with any other key ({'kind': 'event'}, {'until': '1h'}) defaults to a
+        # timer with an empty spec, parses as zero, and the pause is skipped
+        # while the run still reports success. A half-written block is just as
+        # bad: {'kind': 'timer', 'spec': '1h'} has no readable type and
+        # {'type': 'event', 'event': 'x'} parks on an empty event name. Refuse
+        # anything we cannot read rather than pretend the wait happened.
+        if until:
+            unread = sorted(k for k in until if k not in {"type", "spec"})
+            if unread or "type" not in until:
+                shown = ", ".join(repr(k) for k in sorted(until))
+                raise WorkflowGraphError(
+                    f"step {step.get('id')!r}: 'until' is written with keys "
+                    f"{shown}, but only 'type' and 'spec' are read, so it would "
+                    "not wait at all. Write it as {'type': 'timer', 'spec': "
+                    "'1h'} or {'type': 'event', 'spec': 'my.event'}."
+                )
         if str(until.get("type") or "timer") != "timer":
             continue
         spec = str(until.get("spec") or "").strip()
