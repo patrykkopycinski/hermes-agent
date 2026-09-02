@@ -170,9 +170,53 @@ def save_run(state: dict) -> dict:
     return state
 
 
-def load_run(run_id: str) -> dict | None:
+def _reap_if_orphaned(raw: dict) -> dict:
+    """Mark a run failed when the process that owned it is gone.
+
+    ``spawn`` runs the graph on a daemon thread, so a short-lived caller -- a
+    cron tick, a webhook, one ``hermes workflow run`` -- kills the thread
+    mid-step on exit. Nothing else notices: the run file keeps saying
+    ``running`` forever, which hides the failure from an operator and, because
+    it still looks live, stops the workflow being started again.
+
+    The owner stamp already records which process is responsible, so a reader
+    in any process can tell a live run from an abandoned one.
+    """
+    if raw.get("status") != "running":
+        return raw
+    try:
+        from wfgraph.lease import owner_alive
+    except Exception:  # pragma: no cover - lease unavailable
+        return raw
+    if owner_alive(raw):
+        return raw
+
+    raw["status"] = "failed"
+    raw["failed"] = True
+    reason = "run died: the process that owned it exited before it finished"
+    if not raw.get("error"):
+        raw["error"] = reason
+    errors = raw.setdefault("errors", [])
+    if isinstance(errors, list):
+        errors.append({"nodeId": None, "error": reason})
+    with _lock:
+        _write_json(run_path(raw["runId"]), raw)
+    return raw
+
+
+def load_run(run_id: str, *, reap_orphans: bool = True) -> dict | None:
+    """Read a run.
+
+    ``reap_orphans=False`` is for callers that are about to adopt an abandoned
+    run (``advance`` recovering from a crash) rather than report on it -- they
+    need the raw record, not a reaped one.
+    """
     raw = _read_json(run_path(run_id), None)
-    return raw if isinstance(raw, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    if not reap_orphans:
+        return raw
+    return _reap_if_orphaned(raw)
 
 
 def list_runs(workflow_id: str | None = None) -> list[dict]:
