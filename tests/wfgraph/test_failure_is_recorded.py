@@ -31,6 +31,17 @@ def _wf(wid: str = "errwf") -> dict:
     }
 
 
+def _all_runs() -> list[dict]:
+    """Every run on disk, oldest first."""
+    from wfgraph.store import _runs_dir
+    import json as _json
+
+    out = []
+    for p in sorted(_runs_dir().glob("*.json")):
+        out.append(_json.loads(p.read_text(encoding="utf-8")))
+    return out
+
+
 def test_user_fixable_error_is_recorded_on_the_run():
     """A config error the user must fix has to survive on the run record."""
     save_documents([_wf()])
@@ -112,4 +123,32 @@ def test_loop_cap_exhaustion_is_recorded_on_the_run():
     blob = f"{run.get('error')} {run.get('errors')}"
     assert "gave up after" in blob, (
         f"loop-cap run stored no reason: error={run.get('error')!r} errors={run.get('errors')!r}"
+    )
+
+
+def test_escaping_exception_records_a_reason_on_the_inline_path():
+    """An exception escaping advance() must leave a readable reason on the run.
+
+    The inline path (background=False) is the durable one -- cron ticks and
+    webhooks use it. Its except block set status='failed' and re-raised, but
+    never wrote the reason, so an operator reading the stored run afterwards
+    got 'failed' with error=None. Found on a live run against the real
+    HERMES_HOME store, not in a unit fixture.
+    """
+    save_documents([_wf("blowup")])
+
+    def explode(goal, context, payload, config=None, **kw):
+        raise RuntimeError("provider socket died mid-step")
+
+    with pytest.raises(RuntimeError):
+        start_run("blowup", payload={}, background=False, execute_fn=explode)
+
+    runs = _all_runs()
+    assert runs, "no run persisted"
+    run = runs[-1]
+    assert run["status"] == "failed"
+    blob = f"{run.get('error')} {run.get('errors')}"
+    assert "provider socket died" in blob, (
+        f"inline-path crash stored no reason: error={run.get('error')!r} "
+        f"errors={run.get('errors')!r}"
     )
