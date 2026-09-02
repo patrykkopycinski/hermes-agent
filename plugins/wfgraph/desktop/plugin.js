@@ -309,8 +309,14 @@ function ViewerPane({ ctx }) {
   if (error) {
     return jsx(ErrorState, {
       title: 'wfgraph backend unreachable',
+      // Two causes, in the order they actually bite. The dashboard mounts
+      // plugin routes at STARTUP, so a backend installed while it was already
+      // running is invisible until restart -- that is the common case, and the
+      // one that cost real debugging time. config.yaml is the rarer cause.
       description:
-        'Is wfgraph in plugins.enabled in config.yaml? The Python backend only loads when it is.'
+        'Restart the dashboard (hermes dashboard) -- plugin routes mount at ' +
+        'startup, so a backend added later is not served yet. If that does not ' +
+        'fix it, check that wfgraph is in plugins.enabled in config.yaml.'
     })
   }
 
