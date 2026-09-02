@@ -39,20 +39,56 @@ def lock_for(run_id: str) -> threading.Lock:
         return lock
 
 
+def _signal_path(run_id: str):
+    from wfgraph.store import _runs_dir
+
+    return _runs_dir() / f"{run_id}.signal"
+
+
 def signal(run_id: str, kind: str) -> None:
+    """Record a pause/cancel request.
+
+    Whoever cancels is rarely the process running the graph -- it is the CLI,
+    the tool surface, another gateway worker. A module-level dict cannot carry
+    a request across that boundary, so the run ignored it and finished while
+    the caller was told "signalled". The request goes on disk next to the run
+    instead, and stays in memory too so a same-process caller is unaffected.
+    """
     with _signals_lock:
         _signals[run_id] = kind
+    try:
+        path = _signal_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(kind, encoding="utf-8")
+    except OSError:
+        # An unwritable spool must not take the run down; the in-memory
+        # signal still serves a same-process caller.
+        pass
 
 
 def clear_signal(run_id: str) -> None:
     with _signals_lock:
         _signals.pop(run_id, None)
+    try:
+        _signal_path(run_id).unlink()
+    except OSError:
+        pass
+
+
+def _pending_signal(run_id: str) -> str | None:
+    with _signals_lock:
+        kind = _signals.get(run_id)
+    if kind:
+        return kind
+    try:
+        return _signal_path(run_id).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def absorb_signals(state: dict) -> None:
     """Fold a pending pause/cancel into the live state dict."""
-    with _signals_lock:
-        kind = _signals.get(state["runId"])
+    kind = _pending_signal(state["runId"])
     if kind == "pause":
         state["pauseRequested"] = True
     elif kind == "cancel":

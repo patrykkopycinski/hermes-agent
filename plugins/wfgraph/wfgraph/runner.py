@@ -403,6 +403,13 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
         save_run(state)
         return state
 
+    # A cancel is a decision, not a fault. It lands on the state before the
+    # loop exits, and the leftover queue below is its expected aftermath --
+    # relabelling it "failed" would blame the run for stopping when asked.
+    if state.get("status") == "cancelled":
+        save_run(state)
+        return state
+
     leftover = [node_id for node_id in state["queue"] if node_id not in state["ran"]]
     if leftover and not state.get("failed"):
         state["failed"] = True
