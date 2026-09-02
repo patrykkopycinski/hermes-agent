@@ -184,6 +184,11 @@ def start_run(
                 live["status"] = "failed"
                 live["failed"] = True
                 live["pauseRequested"] = False
+                # Without this the run persists as "failed" with error=None --
+                # the same unactionable state defect #12 fixed for step-level
+                # failures. An operator reading a cron/webhook run on disk has
+                # only this record; the exception itself is gone.
+                _record_failure(live, live.get("at") or "run", str(exc))
                 _attach_receipt(live)
                 save_run(live)
                 emit(live, "RunFinished", {"state": "failed", "error": str(exc)})
