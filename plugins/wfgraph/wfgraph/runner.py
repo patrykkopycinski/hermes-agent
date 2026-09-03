@@ -49,7 +49,9 @@ from wfgraph.topology import (
     between,
     by_id,
     config_of,
+    edges_of,
     holds,
+    is_loop,
     kind_of,
     parse_wait_seconds,
     preds,
@@ -324,11 +326,21 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
             return park_pause()
 
         ran = set(state["ran"])
-        satisfied = set(state["satisfied"])
+        # `satisfied` lets a rework take skip a step whose PASS still stands.
+        # It answers "does this need to run again", not "has this finished" --
+        # and a step can be both satisfied and queued for the next take. Reading
+        # it as finished let a gate start in the same pass as the step feeding
+        # it, judging the previous take's verdict while the new one ran beside
+        # it. A predecessor still waiting its turn is not done.
+        pending = set(state["queue"])
+        satisfied = set(state["satisfied"]) - pending
         ready = [
             node_id
             for node_id in state["queue"]
-            if all(pred in ran or pred in satisfied or pred not in steps for pred in preds(scenario, node_id))
+            if all(
+                pred in ran or pred in satisfied or pred not in steps
+                for pred in preds(scenario, node_id)
+            )
         ]
         if not ready:
             break
@@ -595,7 +607,20 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
         state["failed"] = True
         return [], True
 
-    if route in state["ran"]:
+    # Is this arm a rework loop, or just a forward step? The scenario says so
+    # outright -- the author marks the rework edge {"loop": True} and the rest
+    # of the engine already honours it (topology.preds skips loop edges when
+    # deciding readiness). This used to ask `route in state["ran"]` instead,
+    # which is a different question: a forward target can already have run,
+    # and on a gate that evaluates more than once (two arms fanning back in)
+    # the final step got re-run as though it were rework -- shipping twice and
+    # spending a maxLoops budget meant for retries.
+    loops_back = any(
+        edge["target"] == route and is_loop(edge)
+        for edge in edges_of(scenario)
+        if edge["source"] == node_id
+    )
+    if loops_back:
         cap = int(config_of(step).get("maxLoops") or 5)
         if state["loops"] >= cap:
             emit(state, "NodeFailed", {"nodeId": node_id, "iteration": iteration, "error": f"gave up after {cap} takes"})
@@ -614,7 +639,6 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
             },
         )
         body = between(scenario, route, node_id)
-        rerun = []
         for item in body:
             if item in state["ran"]:
                 state["ran"] = [x for x in state["ran"] if x != item]
@@ -630,8 +654,6 @@ def _run_gate(state: dict, step: dict, iteration: int, execute_fn: ExecuteFn | N
                         "reason": f"satisfied · PASS on take {state['take'].get(item) or 1}",
                     },
                 )
-            else:
-                rerun.append(item)
         return [route], False
 
     return [route], False
