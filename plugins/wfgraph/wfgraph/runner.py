@@ -67,6 +67,7 @@ from wfgraph.validate import (
     reject_malformed_structure,
     reject_unknown_kinds,
     reject_unparseable_waits,
+    reject_unrouted_gate_arms,
 )
 from wfgraph.waits import (
     finish_wait,
@@ -174,6 +175,7 @@ def start_run(
     reject_unknown_kinds(steps)
     reject_bad_gate_arms(steps)
     reject_unparseable_waits(steps)
+    reject_unrouted_gate_arms(scenario, steps)
     reject_deadlocked_back_edges(scenario, steps)
     entries = [s["id"] for s in steps if not preds(scenario, s["id"])]
     if not entries and steps:

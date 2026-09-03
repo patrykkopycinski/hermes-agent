@@ -12,7 +12,7 @@ is a sign the check belongs in the walk instead.
 
 from __future__ import annotations
 
-from wfgraph.topology import config_of, kind_of, parse_wait_seconds
+from wfgraph.topology import config_of, kind_of, parse_wait_seconds, succs
 
 
 class WorkflowGraphError(ValueError):
@@ -187,6 +187,57 @@ def reject_deadlocked_back_edges(scenario: dict, steps: list[dict]) -> None:
                 f"loop, so {dst!r} waits on a step that only runs after it and "
                 f"the run can never start it. Add \"loop\": true to that edge if "
                 "it is a rework path."
+            )
+
+
+def reject_unrouted_gate_arms(scenario: dict, steps: list[dict]) -> None:
+    """A gate arm whose id labels no outgoing edge is caught before the run.
+
+    ``_run_gate`` already refuses to act on an arm it cannot route, with a
+    clear message -- but it raises at the moment the gate is reached, which is
+    on the far side of every upstream agent step. On the real path those are
+    model calls: the graph was unroutable when it was written, and the author
+    pays for a full upstream run to find out.
+
+    The mismatch is nearly always a typo between the arm's id and the edge's
+    ``sourceHandle`` (``pass`` vs ``passed``), which is exactly the kind of
+    thing that is free to catch here and expensive to catch there.
+
+    Arms with no id are left alone: an unlabelled arm cannot be matched
+    against a handle at all, and ``_run_gate`` owns that diagnosis with a
+    better message than this check could give.
+
+    Resolution is delegated to ``succs`` -- the same function the runner
+    routes with -- rather than re-derived here. An edge with no
+    ``sourceHandle`` answers to the handle ``"out"``, and a rework arm is
+    routinely drawn as a bare ``loop`` edge; a hand-rolled set of declared
+    handles misses both and rejects graphs that run correctly today.
+    """
+    for step in steps:
+        if kind_of(step) != "gate":
+            continue
+        node_id = str(step.get("id"))
+        for arm in config_of(step).get("arms") or []:
+            if not isinstance(arm, dict):
+                continue
+            arm_id = str(arm.get("id") or "").strip()
+            if not arm_id:
+                continue  # _run_gate's problem, and it says it better
+            if succs(scenario, node_id, arm_id):
+                continue
+            labelled = sorted(
+                {
+                    str(edge.get("sourceHandle") or "out")
+                    for edge in scenario.get("edges") or []
+                    if isinstance(edge, dict) and str(edge.get("source")) == node_id
+                }
+            )
+            known = ", ".join(repr(h) for h in labelled) or "none"
+            raise WorkflowGraphError(
+                f"gate {node_id!r}: arm {arm_id!r} has no outgoing edge, so the "
+                f"gate could match it and have nowhere to go. Edges leaving "
+                f"{node_id!r} answer to: {known}. Give the arm's edge a "
+                f"sourceHandle of {arm_id!r}."
             )
 
 

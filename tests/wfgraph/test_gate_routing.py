@@ -53,7 +53,13 @@ def test_arm_without_id_is_rejected_not_guessed(wf_home):
 
 
 def test_arm_pointing_at_no_edge_is_rejected(wf_home):
-    """A matched arm whose handle labels no edge must raise, not fall through."""
+    """A matched arm whose handle labels no edge must raise, not fall through.
+
+    Caught at validation now (`reject_unrouted_gate_arms`) rather than when
+    the gate is reached, so the message is the validator's. Asserted on the
+    parts that carry the diagnosis -- which arm, and that it is unrouted --
+    rather than one phrasing, so the check can move without a false failure.
+    """
     with pytest.raises(WorkflowGraphError) as exc:
         start_run(
             "f1_dangling",
@@ -61,7 +67,9 @@ def test_arm_pointing_at_no_edge_is_rejected(wf_home):
             background=False,
             execute_fn=_failing_agent,
         )
-    assert "no edge leaves" in str(exc.value)
+    msg = str(exc.value)
+    assert "nonexistent" in msg
+    assert "sourceHandle" in msg
 
 
 def test_fail_verdict_cannot_reach_the_pass_branch(wf_home):
