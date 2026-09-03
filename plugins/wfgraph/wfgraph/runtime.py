@@ -13,8 +13,9 @@ is what keeps the dependency pointing one way at module level.
 from __future__ import annotations
 
 import threading
-import time
 
+from wfgraph import receipt as receipt_states
+from wfgraph.receipt import attach_receipt
 from wfgraph.store import append_event, load_run, save_run
 
 _threads: dict[str, threading.Thread] = {}
@@ -115,38 +116,13 @@ def thread_alive(run_id: str) -> bool:
     return thread is not None and thread.is_alive()
 
 
-def _terminal_receipt(state: dict, *, outcome: str, meaning: str) -> dict:
-    """Build a finish record for a run ending outside the normal walk.
-
-    ``runner._attach_receipt`` covers the graph finishing on its own. A run can
-    also end because its owner died or because someone cancelled it; those are
-    finished runs too, and a reader that gets no receipt cannot tell how long
-    the run was alive or whether any work landed.
-    """
-    finished_at = int(time.time() * 1000)
-    started_at = int(state.get("startedAt") or finished_at)
-    return {
-        "state": outcome,
-        "finishedAt": finished_at,
-        "durationMs": max(0, finished_at - started_at),
-        "nodesRan": len(state.get("ran") or []),
-        "evidence": False,
-        "verified": False,
-        "meaning": meaning,
-    }
-
-
 def fail_dead_run(state: dict) -> dict:
     """A run whose worker is gone. Nothing will ever move it again, so say so
     rather than leaving it spinning at "running" forever."""
     state["status"] = "failed"
     state["failed"] = True
     state["pauseRequested"] = False
-    state["receipt"] = _terminal_receipt(
-        state,
-        outcome="failed",
-        meaning="The process driving this run exited before it finished. No verdict.",
-    )
+    attach_receipt(state, outcome=receipt_states.FAILED, meaning=receipt_states.OWNER_DIED)
     save_run(state)
     emit(state, "RunFinished", {"state": "failed", "error": "runner process died"})
     return load_run(state["runId"]) or state

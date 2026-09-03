@@ -16,6 +16,8 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 from utils import atomic_write_text
 
+from wfgraph import receipt as receipt_states
+
 _lock = threading.RLock()
 _event_sink: Callable[[dict], None] | None = None
 
@@ -203,17 +205,11 @@ def _reap_if_orphaned(raw: dict) -> dict:
     # terminal path gets, or a reader sees "failed" with no finish time and
     # cannot tell how long it hung before the owner died.
     if not isinstance(raw.get("receipt"), dict):
-        finished_at = int(time.time() * 1000)
-        started_at = int(raw.get("startedAt") or finished_at)
-        raw["receipt"] = {
-            "state": "failed",
-            "finishedAt": finished_at,
-            "durationMs": max(0, finished_at - started_at),
-            "nodesRan": len(raw.get("ran") or []),
-            "evidence": False,
-            "verified": False,
-            "meaning": reason,
-        }
+        receipt_states.attach_receipt(
+            raw,
+            outcome=receipt_states.FAILED,
+            meaning=reason,
+        )
     with _lock:
         _write_json(run_path(raw["runId"]), raw)
     return raw
