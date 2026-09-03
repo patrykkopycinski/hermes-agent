@@ -96,7 +96,7 @@ def _run_view(state: dict, *, events: int = 0) -> dict:
 
 
 def wfgraph_tool(
-    action: str = "",
+    action: str | dict = "",
     workflow: Optional[str] = None,
     run_id: Optional[str] = None,
     payload: Any = None,
@@ -113,6 +113,22 @@ def wfgraph_tool(
     events: bool = False,
     **_ignored: Any,  # the dispatcher injects task_id / session context
 ) -> str:
+    # The tool dispatcher calls plugin tools with a single positional dict of
+    # all parameters ({"action": ..., "workflow": ...}) rather than keywords.
+    # Accept both shapes; explicit keywords win over the packed dict.
+    if isinstance(action, dict) and not workflow and not run_id:
+        packed = action
+        action = packed.get("action") or ""
+        workflow = workflow or packed.get("workflow")
+        run_id = run_id or packed.get("run_id")
+        payload = payload if payload is not None else packed.get("payload")
+        scenario = scenario or packed.get("scenario")
+        wait = packed.get("wait", wait)
+        answer = answer or packed.get("answer")
+        node_id = node_id or packed.get("node_id")
+        note = note or packed.get("note")
+        limit = limit if limit is not None else packed.get("limit")
+        events = packed.get("events", events)
     verb = (action or "").strip().lower()
     if verb not in ACTIONS:
         return _err(f"action must be one of: {', '.join(ACTIONS)}.")

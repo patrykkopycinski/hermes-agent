@@ -327,3 +327,21 @@ def test_the_tool_tolerates_dispatcher_injected_kwargs(wf_home):
     """
     out = wfgraph_tool(action="list", task_id="abc", session_id="s", anything=1)
     assert '"error"' not in out
+
+
+def test_the_tool_accepts_a_single_packed_dict_of_arguments(wf_home):
+    """The dispatcher invokes plugin tools with one positional params dict.
+
+    A real agent turn failed with ``AttributeError: 'dict' object has no
+    attribute 'strip'`` on every action, including ones needing no args.
+    """
+    out = wfgraph_tool({"action": "list"})
+    assert '"error"' not in out
+    out = wfgraph_tool(
+        {
+            "action": "save",
+            "workflow": "packed",
+            "scenario": {"steps": [{"id": "t", "kind": "trigger", "config": {}}], "edges": []},
+        }
+    )
+    assert '"saved": "packed"' in out

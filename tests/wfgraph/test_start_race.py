@@ -30,7 +30,7 @@ def execute(*args, **kwargs):
     # Keep the first run active long enough for every concurrent process to
     # inspect it. The transaction prevents duplicate *active* starts; a run
     # deliberately started after completion is a legitimate new invocation.
-    time.sleep(1.0)
+    time.sleep(3.0)
     return {"summary": "ok", "verdict": "PASS", "output": {}}
 state = start_run("race", background=False, execute_fn=execute)
 print(json.dumps({"runId": state["runId"], "status": state["status"]}))
