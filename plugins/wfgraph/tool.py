@@ -68,8 +68,20 @@ def _run_view(state: dict, *, events: int = 0) -> dict:
     }
     park = state.get("park")
     if park:
-        # What it is blocked on, and therefore which verb unblocks it.
+        # What it is blocked on, and therefore which verb unblocks it. The raw
+        # park is echoed under `park`, but the two things a caller actually
+        # needs are promoted and renamed: `respond` takes a node_id, and a
+        # person deciding needs the question. Reporting only "waiting_human"
+        # hands back a verb with no arguments for it.
         view["park"] = park
+        view["waiting_on"] = {
+            "kind": park.get("kind"),
+            "node_id": park.get("nodeId"),
+            "iteration": park.get("iteration"),
+            "prompt": park.get("prompt"),
+            "who": park.get("who"),
+            "until": park.get("until"),
+        }
         view["unblock_with"] = (
             "respond" if park.get("kind") == "human" else "tick"
         )
@@ -89,8 +101,13 @@ def wfgraph_tool(
     run_id: Optional[str] = None,
     payload: Any = None,
     scenario: Optional[dict] = None,
-    wait: bool = False,
+    # Default True: every caller here is a short-lived process (cron job,
+    # subagent, shell). Returning a handle to a worker thread that dies
+    # with the process strands the run mid-flight with no error anywhere.
+    # Pass wait=False deliberately if you have a process that will live.
+    wait: bool = True,
     answer: Optional[str] = None,
+    node_id: Optional[str] = None,
     note: Optional[str] = None,
     limit: Optional[int] = None,
     events: bool = False,
@@ -256,12 +273,26 @@ def wfgraph_tool(
                 "person; there is nothing to answer.",
                 status=state.get("status"),
             )
-        node_id = str(park.get("nodeId") or "").strip()
-        if not node_id:
+        parked_node = str(park.get("nodeId") or "").strip()
+        if not parked_node:
             return _err(
                 f"Run '{run_id}' is waiting on a person but its park names no "
                 "node, so there is nothing to answer."
             )
+        # node_id is optional and only ever a guard. The park is the authority
+        # on which step is asking; taking the caller's word for it would let a
+        # stale id -- read before the run moved on -- answer a question nobody
+        # asked. Passing one that disagrees is a bug worth reporting, not
+        # something to silently honour.
+        wanted = str(node_id or "").strip()
+        if wanted and wanted != parked_node:
+            return _err(
+                f"Run '{run_id}' is waiting on '{parked_node}', not "
+                f"'{wanted}'. Re-read status: the run moved on since you "
+                "looked, and answering the wrong step would resolve a "
+                "question nobody asked."
+            )
+        node_id = parked_node
         from wfgraph.runner import respond
 
         try:
