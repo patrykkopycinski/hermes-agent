@@ -177,8 +177,8 @@ def _write_hook_script(workflow_id: str) -> str:
         f"sys.path.insert(0, {str(_PLUGIN_DIR)!r})\n"
         "from wfgraph.runner import start_from_trigger\n"
         "payload = json.loads(sys.stdin.read() or '{}')\n"
-        f"start_from_trigger({workflow_id!r}, source='webhook', payload=payload)\n"
-        "print('[SILENT]')\n",
+        f"state = start_from_trigger({workflow_id!r}, source='webhook', payload=payload)\n"
+        "print(json.dumps({'runId': state.get('runId'), 'status': state.get('status')}))\n",
         encoding="utf-8",
     )
     return path.name
