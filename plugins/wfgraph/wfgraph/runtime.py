@@ -128,8 +128,13 @@ def fail_dead_run(state: dict) -> dict:
     return load_run(state["runId"]) or state
 
 
-def spawn(run_id: str, execute_fn=None) -> None:
-    """Drive a run on its own thread."""
+def spawn(run_id: str, execute_fn=None, *, foreground: bool = False) -> None:
+    """Drive a run on its own thread.
+
+    ``foreground=True`` runs the drive in the calling thread instead. A resume
+    arriving in a short-lived process (cron tick, bot tool call) must not park
+    its continuation on a daemon thread that dies with that process.
+    """
     from wfgraph.runner import advance
 
     def work() -> None:
@@ -149,6 +154,9 @@ def spawn(run_id: str, execute_fn=None) -> None:
             save_run(state)
             emit(state, "RunFinished", {"state": "failed", "error": str(exc)})
 
+    if foreground:
+        work()
+        return
     thread = threading.Thread(target=work, name=f"workflow-{run_id}", daemon=True)
     with _thread_lock:
         _threads[run_id] = thread
