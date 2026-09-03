@@ -320,8 +320,12 @@ def test_null_verdict_does_not_pass_the_gate(tmp_path, monkeypatch):
                     "config": {
                         "title": "Gate",
                         "arms": [
+                            # Only the pass arm. This test is about a null
+                            # verdict not passing; an any-fail arm with no
+                            # edge to take is rejected up front now by
+                            # validate.reject_unrouted_gate_arms, and it was
+                            # always a latent crash the moment a step FAILed.
                             {"id": "pass", "when": {"mode": "all-pass"}},
-                            {"id": "loop", "when": {"mode": "any-fail"}},
                         ],
                     },
                 },
@@ -536,7 +540,13 @@ def test_manual_trigger_then_agent_ignores_rework_loop(tmp_path, monkeypatch):
                     {"id": "start->implement", "source": "start", "target": "implement"},
                     {"id": "implement->gate", "source": "implement", "target": "gate"},
                     {"id": "gate->approve", "source": "gate", "target": "approve", "sourceHandle": "pass"},
-                    {"id": "gate->implement", "source": "gate", "target": "implement", "loop": True},
+                    {
+                        "id": "gate->implement",
+                        "source": "gate",
+                        "target": "implement",
+                        "sourceHandle": "loop",
+                        "loop": True,
+                    },
                 ],
             ),
         },
