@@ -28,7 +28,11 @@ import {
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { Fragment, useEffect, useState } from 'react'
 
-const ID = 'wfgraph-viewer'
+// MUST match the backend namespace in dashboard/manifest.json ("wfgraph").
+// ctx.rest is scoped by construction to /api/plugins/<this id>/, so an id that
+// differs from the manifest name makes every fetch 404 -- the pane renders its
+// "backend unreachable" state while the backend is running perfectly.
+const ID = 'wfgraph'
 
 // Which run the detail half is showing. Imperative reads in handlers.
 const $selected = atom(null)
