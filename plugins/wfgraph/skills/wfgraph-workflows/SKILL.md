@@ -87,6 +87,9 @@ call(action="runs", workflow="my-wf")         # find a run you lost the id of
 
 ## Scheduled and webhook triggers
 
+After any save/delete of a triggered workflow, bots call `wfgraph` with
+`action="sync"` to create/update/remove the backing cron jobs.
+
 A workflow's FIRST trigger step may declare a start condition. The key is
 `on` (not `trigger`):
 
