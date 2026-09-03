@@ -57,6 +57,14 @@ CANCELLED_BY_REQUEST = (
     "Someone stopped this run before it finished. Steps that had already run "
     "kept their results; the rest never ran."
 )
+DENIED_BY_PERSON = (
+    "A person rejected this step, and the workflow was set to halt on that. "
+    "Steps before it kept their results; nothing after it ran."
+)
+CRASHED = (
+    "A step raised an error the run could not handle, so the run stopped where "
+    "it stood. Read the error on the record before retrying."
+)
 
 
 def has_evidence(state: dict) -> bool:
