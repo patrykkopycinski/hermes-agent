@@ -31,6 +31,7 @@ from wfgraph.runtime import (
     lock_for,
     signal,
     spawn,
+    _terminal_receipt,
 )
 from wfgraph.store import (
     active_run,
@@ -1168,8 +1169,19 @@ def cancel_run(run_id: str) -> dict:
     state["status"] = "cancelled"
     state["park"] = None
     state["queue"] = []
+    state["receipt"] = _terminal_receipt(
+        state,
+        outcome="cancelled",
+        meaning=(
+            "Someone stopped this run before it finished. Steps that had "
+            "already run kept their results; the rest never ran."
+        ),
+    )
     save_run(state)
-    emit(state, "RunFinished", {"state": "failed"})
+    # The event carries the run's own outcome. It used to say "failed" while
+    # the record said "cancelled", so a canvas or log reading the stream
+    # reported a broken workflow every time a user stopped one on purpose.
+    emit(state, "RunFinished", {"state": "cancelled"})
     return load_run(run_id) or state
 
 
