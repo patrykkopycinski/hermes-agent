@@ -23,6 +23,12 @@ def park_human(state: dict, step: dict, iteration: int) -> None:
     cfg = config_of(step)
     who = str(cfg.get("assignee") or "you").strip() or "you"
     prompt = str(cfg.get("goal") or "").strip() or f"{title_of(step)} — approve?"
+    # `{node_id}` tokens pull in that node's summary so the human approves with
+    # the diagnosis in front of them, not a static "approve?".
+    for node_id, summary in (state.get("summaries") or {}).items():
+        token = "{" + node_id + "}"
+        if token in prompt and summary:
+            prompt = prompt.replace(token, str(summary))
     payload = {
         "nodeId": step["id"],
         "iteration": iteration,
