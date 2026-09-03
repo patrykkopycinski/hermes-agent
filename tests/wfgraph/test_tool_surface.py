@@ -220,3 +220,99 @@ def test_an_unknown_verb_lists_the_real_ones(wf_home):
     assert "error" in out
     for verb in ("save", "respond", "tick", "events", "runs"):
         assert verb in out["error"]
+
+
+def test_a_parked_status_says_what_it_is_waiting_on(wf_home):
+    """Knowing a run is blocked is not enough to unblock it.
+
+    `respond` needs a node id, and a human deciding needs the question.
+    Both live in the run's park; a status that reports only "waiting_human"
+    leaves a caller with the verb and no arguments for it.
+    """
+    call(action="save", workflow="appr", scenario=APPROVAL_GRAPH)
+    run_id = call(action="run", workflow="appr", wait=True)["runId"]
+
+    st = call(action="status", run_id=run_id)
+    waiting = st.get("waiting_on")
+    assert waiting, st
+    assert waiting["node_id"] == "ask", waiting
+    assert "approve" in (waiting.get("prompt") or "").lower(), waiting
+    assert waiting.get("kind") == "human", waiting
+
+
+def test_the_parked_status_carries_enough_to_call_respond(wf_home):
+    """The end-to-end point: status -> respond with no guessing."""
+    call(action="save", workflow="appr", scenario=APPROVAL_GRAPH)
+    run_id = call(action="run", workflow="appr", wait=True)["runId"]
+
+    st = call(action="status", run_id=run_id)
+    out = call(
+        action=st["unblock_with"],
+        run_id=run_id,
+        node_id=st["waiting_on"]["node_id"],
+        answer="approved",
+    )
+    assert out["status"] != "waiting_human", out
+
+
+def test_answering_the_wrong_step_is_refused(wf_home):
+    """A node_id that disagrees with the park is a stale read, not a hint.
+
+    Honouring it would resolve a question nobody asked -- the run moved
+    on between the status call and the answer.
+    """
+    call(action="save", workflow="appr", scenario=APPROVAL_GRAPH)
+    run_id = call(action="run", workflow="appr", wait=True)["runId"]
+
+    out = call(
+        action="respond", run_id=run_id, node_id="some-other-step",
+        answer="approved",
+    )
+    assert "error" in out, out
+    assert "ask" in out["error"], out
+    assert call(action="status", run_id=run_id)["status"] == "waiting_human"
+
+
+def test_run_finishes_before_it_returns_by_default(wf_home):
+    """A tool call that outlives its process is not a run, it is a leak.
+
+    The engine defaults `start_run(background=True)`, which is right for a
+    desktop app holding a window open and wrong for every caller here: a
+    cron job, a subagent, a shell. Those processes exit as soon as the tool
+    returns, taking the worker thread with them, and the run is stranded
+    mid-flight with no error anywhere.
+
+    Proven across a real process boundary: a subprocess that starts a run
+    and exits immediately must leave a finished run behind, not a running
+    one. In-process this would pass either way -- the thread would just
+    keep going -- so the boundary is the whole test.
+    """
+    graph = {
+        "steps": [
+            {"id": "t", "kind": "trigger", "config": {}},
+            {"id": "hold", "kind": "wait",
+             "config": {"until": {"type": "timer", "spec": "1s"}}},
+        ],
+        "edges": [{"id": "e1", "source": "t", "target": "hold"}],
+    }
+    call(action="save", workflow="sync", scenario=graph)
+
+    script = (
+        "import os,sys,json;"
+        f"os.environ['HERMES_HOME']={str(wf_home)!r};"
+        f"sys.path.insert(0,{_PLUGIN_DIR!r});"
+        "import tool as T;"
+        "r=json.loads(T.wfgraph_tool(action='run', workflow='sync'));"
+        "print(r['runId'], r['status'])"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_id, reported = proc.stdout.strip().split()
+
+    # The run reached its park before the process died -- not "running",
+    # which would mean the caller got a handle to a thread that no longer
+    # exists.
+    assert reported == "waiting_world", proc.stdout
+    assert call(action="status", run_id=run_id)["status"] == "waiting_world"
