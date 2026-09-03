@@ -23,6 +23,8 @@ from typing import Any, Callable
 from wfgraph import fake
 from wfgraph.lease import owner_alive
 from wfgraph.lease import stamp as lease_stamp
+from wfgraph import receipt as receipt_states
+from wfgraph.receipt import attach_receipt
 from wfgraph.runtime import (
     absorb_signals,
     clear_signal,
@@ -31,7 +33,6 @@ from wfgraph.runtime import (
     lock_for,
     signal,
     spawn,
-    _terminal_receipt,
 )
 from wfgraph.store import (
     active_run,
@@ -441,54 +442,21 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
     return load_run(run_id) or state
 
 
-# Borrowed from Limen's job record, which stores `state = done` for a job and
-# says plainly that done means the process ended cleanly -- not that the work is
-# correct or the branch is safe to merge. Its coordinator still reads the
-# record, the diff, and the checks before merging.
-#
-# wfgraph used to stop at `status = "succeeded"`, which is the process outcome
-# wearing the costume of a verdict. A graph whose agent returned ok with an
-# empty summary finished every node and reported green; a cron operator reading
-# the stored run had no finish time and nothing to check the claim against.
-#
-# The receipt keeps those two ideas apart on the record itself:
-#   state     -- the process outcome, the same fact `status` carries
-#   verified  -- always False here; nothing in the engine judges the work
-#   evidence  -- did any node actually produce output, or did it just run
-#   meaning   -- the caveat in the record, for whoever reads it without docs
 def _attach_receipt(state: dict) -> None:
-    """Stamp the finish record used by cron, webhooks, and the status tool."""
-    finished_at = int(time.time() * 1000)
-    started_at = int(state.get("startedAt") or finished_at)
-    ran = state.get("ran") or []
-    summaries = state.get("summaries") or {}
-    outputs = state.get("outputs") or {}
+    """Stamp the finish record used by cron, webhooks, and the status tool.
 
-    produced = any(str(v or "").strip() for v in summaries.values())
-    if not produced:
-        # outputs values are structured ({"text": ...}), so stringifying the
-        # container is always truthy -- look at the payload, not the wrapper.
-        for value in outputs.values():
-            if isinstance(value, dict):
-                if any(str(inner or "").strip() for inner in value.values()):
-                    produced = True
-                    break
-            elif str(value or "").strip():
-                produced = True
-                break
-
-    state["receipt"] = {
-        "state": "failed" if state.get("failed") else "done",
-        "finishedAt": finished_at,
-        "durationMs": max(0, finished_at - started_at),
-        "nodesRan": len(ran),
-        "evidence": bool(produced),
-        "verified": False,
-        "meaning": (
-            "The run ended cleanly. This does NOT mean the work is correct "
-            "or complete -- read the outputs and checks before acting on it."
+    The graph finished its own walk. Every other terminal path (owner died,
+    cancelled, reaped) stamps the same record through the same builder --
+    see wfgraph.receipt for what the fields do and do not claim.
+    """
+    failed = bool(state.get("failed"))
+    attach_receipt(
+        state,
+        outcome=receipt_states.FAILED if failed else receipt_states.DONE,
+        meaning=(
+            receipt_states.FINISHED_FAILED if failed else receipt_states.FINISHED_CLEANLY
         ),
-    }
+    )
 
 
 def _run_trigger(state: dict, step: dict, iteration: int) -> None:
@@ -1169,13 +1137,10 @@ def cancel_run(run_id: str) -> dict:
     state["status"] = "cancelled"
     state["park"] = None
     state["queue"] = []
-    state["receipt"] = _terminal_receipt(
+    attach_receipt(
         state,
-        outcome="cancelled",
-        meaning=(
-            "Someone stopped this run before it finished. Steps that had "
-            "already run kept their results; the rest never ran."
-        ),
+        outcome=receipt_states.CANCELLED,
+        meaning=receipt_states.CANCELLED_BY_REQUEST,
     )
     save_run(state)
     # The event carries the run's own outcome. It used to say "failed" while

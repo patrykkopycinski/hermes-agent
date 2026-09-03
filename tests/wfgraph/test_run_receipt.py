@@ -58,7 +58,7 @@ def test_receipt_records_when_the_run_ended():
 
     assert receipt["finishedAt"] >= run["startedAt"]
     assert receipt["durationMs"] >= 0
-    assert receipt["state"] == "done"
+    assert receipt["state"] == "succeeded"
 
 
 def test_done_does_not_claim_the_work_is_correct():
@@ -78,7 +78,7 @@ def test_done_does_not_claim_the_work_is_correct():
 
     receipt = load_run(out["runId"])["receipt"]
 
-    assert receipt["state"] == "done"
+    assert receipt["state"] == "succeeded"
     assert receipt["verified"] is False
     assert "not" in receipt["meaning"].lower()
 
@@ -120,7 +120,7 @@ def test_real_output_counts_as_evidence():
     receipt = load_run(out["runId"])["receipt"]
 
     assert receipt["evidence"] is True
-    assert receipt["state"] == "done"
+    assert receipt["state"] == "succeeded"
 
 
 def test_failed_run_gets_a_receipt_too():
