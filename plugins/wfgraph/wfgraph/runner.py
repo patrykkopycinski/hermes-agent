@@ -44,6 +44,7 @@ from wfgraph.store import (
     new_run_id,
     save_run,
     upsert_document,
+    workflow_lock,
 )
 from wfgraph.topology import (
     between,
@@ -142,6 +143,56 @@ def start_run(
     background: bool = True,
     fake: bool = False,
 ) -> dict:
+    """Start at most one active run for a workflow across all processes."""
+    # Lock only the active-run check + creation. Holding this while executing a
+    # synchronous graph would serialize callers but let each start a new run
+    # after the prior one finishes -- exactly the duplicate-trigger burst this
+    # transaction prevents. Canonicalize aliases so a name and id share a lock.
+    doc = get_document(workflow_id)
+    canonical_id = doc["id"] if doc is not None else workflow_id
+    with workflow_lock(canonical_id):
+        state, created = _prepare_run(
+            workflow_id,
+            scenario=scenario,
+            payload=payload,
+            source=source,
+            fake=fake,
+        )
+    if not created:
+        return state
+
+    if background:
+        spawn(state["runId"], execute_fn)
+    else:
+        # The inline path is the durable one (cron ticks, webhooks, tests).
+        # spawn() already converts a crash into a failed run; without the same
+        # guard here an exception escapes with the run file still at
+        # "running", leaving a workflow that neither progresses nor finishes.
+        try:
+            advance(state["runId"], execute_fn=execute_fn)
+        except Exception as exc:
+            live = load_run(state["runId"]) or state
+            if live.get("status") not in {"succeeded", "failed", "cancelled"}:
+                live["status"] = "failed"
+                live["failed"] = True
+                live["pauseRequested"] = False
+                _record_failure(live, live.get("at") or "run", str(exc))
+                _attach_receipt(live)
+                save_run(live)
+                emit(live, "RunFinished", {"state": "failed", "error": str(exc)})
+            raise
+    return load_run(state["runId"]) or state
+
+
+def _prepare_run(
+    workflow_id: str,
+    *,
+    scenario: dict | None = None,
+    payload: Any = None,
+    source: str = "manual",
+    fake: bool = False,
+) -> tuple[dict, bool]:
+    """Claim/create a run while the caller holds its workflow lock."""
     doc = get_document(workflow_id)
     if doc is not None:
         workflow_id = doc["id"]
@@ -158,14 +209,10 @@ def start_run(
     name = (doc or {}).get("name") or workflow_id
     existing = active_run(workflow_id)
     if existing is not None:
-        # Liveness must be judged by the run's recorded owner, not by this
-        # interpreter's thread registry: a cron tick or webhook process has an
-        # empty registry and would otherwise reap a perfectly healthy run and
-        # start a duplicate alongside it.
         if existing.get("status") == "running" and not owner_alive(existing):
             fail_dead_run(existing)
         else:
-            return existing
+            return existing, False
 
     state = _fresh_state(workflow_id, scenario, payload, source, name)
     if fake:
@@ -183,31 +230,7 @@ def start_run(
     state["queue"] = list(entries)
     save_run(state)
     emit(state, "RunStarted", {"scenario": name})
-    if background:
-        spawn(state["runId"], execute_fn)
-    else:
-        # The inline path is the durable one (cron ticks, webhooks, tests).
-        # spawn() already converts a crash into a failed run; without the same
-        # guard here an exception escapes with the run file still at
-        # "running", leaving a workflow that neither progresses nor finishes.
-        try:
-            advance(state["runId"], execute_fn=execute_fn)
-        except Exception as exc:
-            live = load_run(state["runId"]) or state
-            if live.get("status") not in {"succeeded", "failed", "cancelled"}:
-                live["status"] = "failed"
-                live["failed"] = True
-                live["pauseRequested"] = False
-                # Without this the run persists as "failed" with error=None --
-                # the same unactionable state defect #12 fixed for step-level
-                # failures. An operator reading a cron/webhook run on disk has
-                # only this record; the exception itself is gone.
-                _record_failure(live, live.get("at") or "run", str(exc))
-                _attach_receipt(live)
-                save_run(live)
-                emit(live, "RunFinished", {"state": "failed", "error": str(exc)})
-            raise
-    return load_run(state["runId"]) or state
+    return state, True
 
 
 def start_from_trigger(
