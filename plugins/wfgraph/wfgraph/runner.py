@@ -433,8 +433,23 @@ def _advance(run_id: str, execute_fn: ExecuteFn | None) -> dict:
     # A cancel is a decision, not a fault. It lands on the state before the
     # loop exits, and the leftover queue below is its expected aftermath --
     # relabelling it "failed" would blame the run for stopping when asked.
+    #
+    # This is the *signal* path: `cancel_run` finalises a run it owns, but a
+    # cancel raised while this walk is in flight is absorbed by the loop and
+    # lands here instead. It ends the run, so it owes the same receipt and the
+    # same RunFinished event -- without them a cancelled run has no finish time
+    # and the event stream just stops mid-walk.
     if state.get("status") == "cancelled":
-        save_run(state)
+        if not isinstance(state.get("receipt"), dict):
+            attach_receipt(
+                state,
+                outcome=receipt_states.CANCELLED,
+                meaning=receipt_states.CANCELLED_BY_REQUEST,
+            )
+            save_run(state)
+            emit(state, "RunFinished", {"state": "cancelled"})
+        else:
+            save_run(state)
         return state
 
     leftover = [node_id for node_id in state["queue"] if node_id not in state["ran"]]
@@ -888,6 +903,11 @@ def respond(run_id: str, node_id: str, decision: str, *, by: str | None = None, 
                 state["take"][node_id] = iteration + 1
                 state["verdicts"][node_id] = "FAIL"
                 state["status"] = "failed"
+                attach_receipt(
+                    state,
+                    outcome=receipt_states.FAILED,
+                    meaning=receipt_states.DENIED_BY_PERSON,
+                )
                 save_run(state)
                 emit(state, "RunFinished", {"state": "failed"})
                 return load_run(run_id) or state

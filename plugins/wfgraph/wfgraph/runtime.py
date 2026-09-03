@@ -141,6 +141,11 @@ def spawn(run_id: str, execute_fn=None) -> None:
                 return
             state["status"] = "failed"
             state["failed"] = True
+            attach_receipt(
+                state,
+                outcome=receipt_states.FAILED,
+                meaning=receipt_states.CRASHED,
+            )
             save_run(state)
             emit(state, "RunFinished", {"state": "failed", "error": str(exc)})
 
