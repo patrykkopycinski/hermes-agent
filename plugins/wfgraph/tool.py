@@ -111,6 +111,7 @@ def wfgraph_tool(
     note: Optional[str] = None,
     limit: Optional[int] = None,
     events: bool = False,
+    **_ignored: Any,  # the dispatcher injects task_id / session context
 ) -> str:
     verb = (action or "").strip().lower()
     if verb not in ACTIONS:

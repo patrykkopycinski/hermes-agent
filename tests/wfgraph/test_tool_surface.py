@@ -316,3 +316,14 @@ def test_run_finishes_before_it_returns_by_default(wf_home):
     # exists.
     assert reported == "waiting_world", proc.stdout
     assert call(action="status", run_id=run_id)["status"] == "waiting_world"
+
+
+def test_the_tool_tolerates_dispatcher_injected_kwargs(wf_home):
+    """The dispatcher injects task_id/session context the tool never declared.
+
+    A real agent turn under a bot profile failed with
+    ``TypeError: wfgraph_tool() got an unexpected keyword argument 'task_id'``
+    before any verb ran. Plugin tools must tolerate injected call context.
+    """
+    out = wfgraph_tool(action="list", task_id="abc", session_id="s", anything=1)
+    assert '"error"' not in out
