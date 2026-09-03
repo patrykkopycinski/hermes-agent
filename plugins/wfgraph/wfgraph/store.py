@@ -13,10 +13,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from wfgraph import receipt as receipt_states
+
 from hermes_constants import get_hermes_home
 from utils import atomic_write_text
-
-from wfgraph import receipt as receipt_states
 
 _lock = threading.RLock()
 _event_sink: Callable[[dict], None] | None = None
