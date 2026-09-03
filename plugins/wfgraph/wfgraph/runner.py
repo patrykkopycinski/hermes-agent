@@ -999,15 +999,19 @@ def request_pause(run_id: str) -> dict:
 
 
 def resume_run(run_id: str, *, execute_fn: ExecuteFn | None = None) -> dict:
-    state = load_run(run_id)
-    if state is None:
-        raise ValueError(f"No run '{run_id}'.")
-    if state.get("status") != "paused":
-        return state
-    clear_signal(run_id)
-    state["pauseRequested"] = False
-    state["status"] = "running"
-    save_run(state)
+    # Cross-process transaction, same rule as start_run: two bot processes
+    # resuming within the load->save window would both flip paused->running
+    # and both drive the run. Decide under the run's file lock.
+    with workflow_lock(f"run-{run_id}"):
+        state = load_run(run_id)
+        if state is None:
+            raise ValueError(f"No run '{run_id}'.")
+        if state.get("status") != "paused":
+            return state
+        clear_signal(run_id)
+        state["pauseRequested"] = False
+        state["status"] = "running"
+        save_run(state)
     if execute_fn is not None:
         return advance(run_id, execute_fn=execute_fn)
     spawn(run_id)
