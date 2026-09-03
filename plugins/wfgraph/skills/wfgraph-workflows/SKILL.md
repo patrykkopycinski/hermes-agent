@@ -85,6 +85,21 @@ call(action="events", run_id=rid, limit=50)   # ordered trail, newest last
 call(action="runs", workflow="my-wf")         # find a run you lost the id of
 ```
 
+## Scheduled and webhook triggers
+
+A workflow's FIRST trigger step may declare a start condition. The key is
+`on` (not `trigger`):
+
+```python
+{"id": "t", "kind": "trigger", "config": {"on": {"type": "cron", "spec": "*/5 * * * *"}}}
+```
+
+After saving, call `sync_triggers()` from `wfgraph.triggers` (the tool does not
+expose a sync verb yet) — this creates a real no-agent cron job per cron
+trigger and removes jobs for deleted workflows. The generated script fires
+`start_from_trigger` in a fresh process, so runs survive process exit.
+Cron-expression schedules need `pip install croniter`.
+
 ## Authoring a graph
 
 ```python
