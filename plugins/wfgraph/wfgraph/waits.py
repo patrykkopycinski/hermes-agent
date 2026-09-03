@@ -142,6 +142,17 @@ def _resume(state: dict, park: dict, by: str) -> None:
         live = load_run(state["runId"])
         if live is None or live.get("status") != "waiting_world":
             return
+        # "Still parked" is not the same question as "still parked on THIS".
+        # Callers read the park outside this lock, so by the time we hold it the
+        # run may have resumed, walked on, and parked somewhere else -- a status
+        # check alone would happily resolve that new park in the old one's name,
+        # appending the wrong node to `ran` and clearing a wait nobody resolved.
+        # A park is identified by which node is waiting and on which take.
+        live_park = live.get("park") or {}
+        same_node = live_park.get("nodeId") == park.get("nodeId")
+        same_take = int(live_park.get("iteration") or 0) == int(park.get("iteration") or 0)
+        if not (same_node and same_take):
+            return
         node_id = park["nodeId"]
         finish_wait(live, node_id, int(park.get("iteration") or 0), by)
         for nxt in succs(live["scenario"], node_id):
