@@ -66,6 +66,7 @@ from wfgraph.validate import (
     reject_bad_gate_arms,
     reject_deadlocked_back_edges,
     reject_malformed_structure,
+    reject_misshapen_edges,
     reject_unknown_kinds,
     reject_unparseable_waits,
     reject_unrouted_gate_arms,
@@ -224,6 +225,7 @@ def _prepare_run(
     steps = steps_of(scenario)
     reject_malformed_structure(scenario, steps)
     reject_unknown_kinds(steps)
+    reject_misshapen_edges(scenario, steps)
     reject_bad_gate_arms(steps)
     reject_unparseable_waits(steps)
     reject_unrouted_gate_arms(scenario, steps)

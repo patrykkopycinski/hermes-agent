@@ -73,6 +73,20 @@ def test_saving_an_unrunnable_graph_is_refused_not_stored(wf_home):
     assert not any(w["id"] == "bad" for w in listed["workflows"]), listed
 
 
+def test_saving_from_to_edges_is_refused_not_stored(wf_home):
+    """from/to edges silently turned every node into a root (2026-09-03)."""
+    broken = {
+        "steps": [
+            {"id": "t", "kind": "trigger", "config": {}},
+            {"id": "a", "kind": "agent", "config": {"goal": "x"}},
+        ],
+        "edges": [{"from": "t", "to": "a"}],
+    }
+    out = call(action="save", workflow="fromto", scenario=broken)
+    assert "error" in out, out
+    assert "source/target" in out["error"], out
+
+
 def test_a_parked_run_says_what_would_unblock_it(wf_home):
     """`status` used to report waiting_human with no hint of the next move."""
     call(action="save", workflow="appr", scenario=APPROVAL_GRAPH)

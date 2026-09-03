@@ -241,6 +241,38 @@ def reject_unrouted_gate_arms(scenario: dict, steps: list[dict]) -> None:
             )
 
 
+def reject_misshapen_edges(scenario: dict, steps: list[dict]) -> None:
+    """Reject edges whose keys are wrong (e.g. from/to) before a run starts.
+
+    edges_of() drops any edge dict without source/target — by design for
+    malformed junk, but an author writing {\"from\": a, \"to\": b} (a common
+    guess) gets a graph where every node is a root and everything runs at
+    once, including nodes meant to be gated behind a human approval.
+    Caught live 2026-09-03: a mis-authored watch-response workflow ran its
+    `act` step BEFORE the human park because its edges used from/to.
+    """
+    known_ids = {s["id"] for s in steps}
+    for index, edge in enumerate(scenario.get("edges") or []):
+        if not isinstance(edge, dict):
+            raise WorkflowGraphError(
+                f"edge at position {index} is a {type(edge).__name__}, not an object"
+            )
+        if not edge.get("source") or not edge.get("target"):
+            hint = ""
+            if edge.get("from") or edge.get("to"):
+                hint = " It looks like from/to keys — this engine uses source/target."
+            raise WorkflowGraphError(
+                f"edge at position {index} ({edge}) is missing source/target"
+                f" and would be silently ignored.{hint} Every node it was meant"
+                " to sequence would run at once as a root."
+            )
+        if edge["source"] not in known_ids or edge["target"] not in known_ids:
+            raise WorkflowGraphError(
+                f"edge {edge['source']} -> {edge['target']} references a step"
+                " that does not exist in this workflow."
+            )
+
+
 def reject_unknown_kinds(steps: list[dict]) -> None:
     """Fail a malformed graph at start, loudly, instead of running nothing."""
     unknown = [

@@ -189,6 +189,7 @@ def wfgraph_tool(
                 reject_bad_gate_arms,
                 reject_deadlocked_back_edges,
                 reject_malformed_structure,
+                reject_misshapen_edges,
                 reject_unknown_kinds,
                 reject_unparseable_waits,
                 reject_unrouted_gate_arms,
@@ -197,6 +198,7 @@ def wfgraph_tool(
             _steps = _steps_of(scenario)
             reject_malformed_structure(scenario, _steps)
             reject_unknown_kinds(_steps)
+            reject_misshapen_edges(scenario, _steps)
             reject_bad_gate_arms(_steps)
             reject_unparseable_waits(_steps)
             reject_unrouted_gate_arms(scenario, _steps)
