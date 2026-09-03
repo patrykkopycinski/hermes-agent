@@ -29,6 +29,7 @@ ACTIONS = (
     "respond",
     "tick",
     "cancel",
+    "sync",
 )
 
 # status/events default page sizes. Event logs grow without bound on a long
@@ -217,6 +218,23 @@ def wfgraph_tool(
             return _err(f"No workflow called '{wf_id}'.")
         remove_document(wf_id)
         return _ok(deleted=wf_id)
+
+    if verb == "sync":
+        # Refresh cron/webhook triggers from the stored documents. A bot that
+        # just saved (or deleted) a cron workflow calls this once; the sync
+        # creates, updates, and removes the backing no-agent cron jobs.
+        try:
+            from wfgraph.triggers import sync_triggers
+        except Exception as exc:
+            return _err(f"Failed to import triggers: {exc}")
+        try:
+            out = sync_triggers()
+        except Exception as exc:
+            return _err(f"Failed to sync triggers: {exc}")
+        return _ok(
+            cron=out.get("cron", []),
+            webhooks=out.get("webhooks", {}),
+        )
 
     if verb == "runs":
         # A bot that loses a run id cannot otherwise find its own work.

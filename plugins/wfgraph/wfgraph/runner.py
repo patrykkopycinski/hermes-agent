@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from wfgraph import fake
 from wfgraph import receipt as receipt_states
-from wfgraph.lease import owner_alive
+from wfgraph.lease import owner_alive, stamp
 from wfgraph.lease import stamp as lease_stamp
 from wfgraph.receipt import attach_receipt
 from wfgraph.runtime import (
@@ -209,7 +209,11 @@ def _prepare_run(
     name = (doc or {}).get("name") or workflow_id
     existing = active_run(workflow_id)
     if existing is not None:
-        if existing.get("status") == "running" and not owner_alive(existing):
+        # `running` and `paused` are owner-bound: if the process that held
+        # them is gone, the run can never progress -- fail it so a fresh run
+        # may start. `waiting_human` / `waiting_world` parks have no owner by
+        # design; they are resumed by respond/tick, not reaped here.
+        if existing.get("status") in ("running", "paused") and not owner_alive(existing):
             fail_dead_run(existing)
         else:
             return existing, False
@@ -1001,7 +1005,8 @@ def request_pause(run_id: str) -> dict:
 def resume_run(run_id: str, *, execute_fn: ExecuteFn | None = None) -> dict:
     # Cross-process transaction, same rule as start_run: two bot processes
     # resuming within the load->save window would both flip paused->running
-    # and both drive the run. Decide under the run's file lock.
+    # and both drive the run. Decide under the run's file lock, and stamp the
+    # new owner so a later process can tell a live driver from a dead one.
     with workflow_lock(f"run-{run_id}"):
         state = load_run(run_id)
         if state is None:
@@ -1011,6 +1016,7 @@ def resume_run(run_id: str, *, execute_fn: ExecuteFn | None = None) -> dict:
         clear_signal(run_id)
         state["pauseRequested"] = False
         state["status"] = "running"
+        state["owner"] = stamp()
         save_run(state)
     if execute_fn is not None:
         return advance(run_id, execute_fn=execute_fn)

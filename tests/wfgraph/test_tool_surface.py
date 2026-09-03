@@ -345,3 +345,34 @@ def test_the_tool_accepts_a_single_packed_dict_of_arguments(wf_home):
         }
     )
     assert '"saved": "packed"' in out
+
+
+def test_sync_verb_creates_a_cron_job_for_a_cron_workflow(wf_home, monkeypatch):
+    """action='sync' must expose trigger sync to bots without python imports."""
+    import sys, types
+    from tests.wfgraph.test_cron_sync import FakeCron  # reuse the cron stub
+
+    fake = FakeCron()
+    module = types.ModuleType("cron.jobs")
+    module.create_job = fake.create_job
+    module.update_job = fake.update_job
+    module.remove_job = fake.remove_job
+    module.list_jobs = fake.list_jobs
+    package = types.ModuleType("cron")
+    package.jobs = module
+    monkeypatch.setitem(sys.modules, "cron", package)
+    monkeypatch.setitem(sys.modules, "cron.jobs", module)
+
+    wfgraph_tool(
+        action="save",
+        workflow="syncwf",
+        scenario={
+            "steps": [
+                {"id": "t", "kind": "trigger", "config": {"on": {"type": "cron", "spec": "*/5 * * * *"}}}
+            ],
+            "edges": [],
+        },
+    )
+    out = json.loads(wfgraph_tool(action="sync"))
+    assert "error" not in out, out
+    assert len(out.get("cron", [])) == 1, out
