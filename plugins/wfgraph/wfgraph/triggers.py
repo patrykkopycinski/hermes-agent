@@ -228,11 +228,24 @@ def sync_cron_jobs(docs: list[dict] | None = None) -> list[str]:
             continue
         wanted[doc["id"]] = trigger["spec"]
 
-    existing = { (job.get("origin") or {}).get("workflow_id"): job for job in _owned_jobs() }
+    # Group by workflow rather than mapping one job each: a workflow can end up
+    # with two owned jobs (this function reads the job list, then creates, with
+    # no lock between -- a cron tick racing a canvas save has both syncs seeing
+    # "none yet"). Keyed one-to-one, the extra job is invisible here and never
+    # removed, so the workflow fires twice on every schedule and no later sync
+    # heals it. Keep the first, delete the rest.
+    existing: dict[str, list[dict]] = {}
+    for job in _owned_jobs():
+        workflow_id = (job.get("origin") or {}).get("workflow_id")
+        existing.setdefault(workflow_id, []).append(job)
+
     kept_ids = []
     for workflow_id, schedule in wanted.items():
         script = _write_tick_script(workflow_id)
-        job = existing.get(workflow_id)
+        duplicates = existing.get(workflow_id) or []
+        job = duplicates[0] if duplicates else None
+        for extra in duplicates[1:]:
+            remove_job(extra["id"])
         if job is None:
             created = create_job(
                 prompt="",
@@ -251,9 +264,10 @@ def sync_cron_jobs(docs: list[dict] | None = None) -> list[str]:
         update_job(job["id"], updates)
         kept_ids.append(job["id"])
 
-    for workflow_id, job in existing.items():
+    for workflow_id, jobs in existing.items():
         if workflow_id not in wanted:
-            remove_job(job["id"])
+            for job in jobs:
+                remove_job(job["id"])
 
     return kept_ids
 
