@@ -159,7 +159,11 @@ def _resume(state: dict, park: dict, by: str) -> None:
             if nxt not in live["queue"]:
                 live["queue"].append(nxt)
         save_run(live)
-    spawn(state["runId"])
+    # A tick often arrives in a short-lived process (a cron job or a bot tool
+    # call). spawn() puts the continuation on a daemon thread that dies with
+    # that process, stranding the run at "running" to be reaped as dead. Run
+    # the continuation in the foreground of whoever resumed it.
+    spawn(state["runId"], foreground=True)
 
 
 def tick_polls(run_id: str | None = None) -> list[str]:
