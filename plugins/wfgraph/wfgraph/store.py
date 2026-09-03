@@ -6,12 +6,15 @@ This is the copy the gateway, cron, and inbound webhooks read.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import threading
+import time
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from hermes_constants import get_hermes_home
 from utils import atomic_write_text
@@ -46,6 +49,59 @@ def _runs_dir() -> Path:
     path = workflows_dir() / "runs"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextlib.contextmanager
+def workflow_lock(workflow_id: str, *, timeout: float = 30.0) -> Iterator[None]:
+    """Serialize a workflow transaction across Hermes processes.
+
+    ``threading.RLock`` only protects one interpreter. Cron, webhook and bot
+    tool invocations are separate processes and otherwise race between
+    ``active_run`` and ``save_run``. A lock file is advisory, bounded, and
+    released by the kernel if its process dies.
+    """
+    lock_path = workflows_dir() / f".{workflow_id}.lock"
+    handle = lock_path.open("a+b")
+    deadline = time.monotonic() + timeout
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+
+            while True:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out locking workflow '{workflow_id}'.")
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out locking workflow '{workflow_id}'.")
+                    time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -109,31 +165,40 @@ def get_document(workflow_id: str) -> dict | None:
 
 
 def upsert_document(doc: dict) -> dict:
-    docs = load_documents()
-    found = False
-    next_docs = []
-    for existing in docs["docs"]:
-        if existing["id"] == doc["id"]:
-            merged = {**existing, **doc, "updatedAt": int(time.time() * 1000)}
-            next_docs.append(merged)
-            found = True
-        else:
-            next_docs.append(existing)
-    if not found:
-        incoming = dict(doc)
-        incoming["updatedAt"] = int(time.time() * 1000)
-        next_docs.append(incoming)
-    current = docs["currentId"] if found else doc["id"]
-    return save_documents(next_docs, current)
+    # Authoring happens from independent bot/desktop processes. The load +
+    # merge + save must be one transaction or simultaneous workflow creates
+    # overwrite one another.
+    workflow_id = str(doc.get("id") or "")
+    if not workflow_id:
+        raise ValueError("Workflow document requires a non-empty id.")
+    with workflow_lock("documents"):
+        docs = load_documents()
+        found = False
+        next_docs = []
+        for existing in docs["docs"]:
+            if existing["id"] == workflow_id:
+                merged = {**existing, **doc, "id": workflow_id, "updatedAt": int(time.time() * 1000)}
+                next_docs.append(merged)
+                found = True
+            else:
+                next_docs.append(existing)
+        if not found:
+            incoming = dict(doc)
+            incoming["id"] = workflow_id
+            incoming["updatedAt"] = int(time.time() * 1000)
+            next_docs.append(incoming)
+        current = docs["currentId"] if found else workflow_id
+        return save_documents(next_docs, current)
 
 
 def remove_document(workflow_id: str) -> dict[str, Any]:
-    docs = load_documents()
-    next_docs = [d for d in docs["docs"] if d["id"] != workflow_id]
-    current = docs["currentId"]
-    if current == workflow_id:
-        current = next_docs[-1]["id"] if next_docs else None
-    return save_documents(next_docs, current)
+    with workflow_lock("documents"):
+        docs = load_documents()
+        next_docs = [d for d in docs["docs"] if d["id"] != workflow_id]
+        current = docs["currentId"]
+        if current == workflow_id:
+            current = next_docs[-1]["id"] if next_docs else None
+        return save_documents(next_docs, current)
 
 
 def load_secrets() -> dict[str, str]:
@@ -267,23 +332,42 @@ def append_event(
     *,
     seq: int | None = None,
 ) -> dict:
-    """Append one jsonl line. ``seq`` is the caller's counter — do not reload
-    the run JSON and write it back, or an in-flight ``save_run`` of stale
-    ``seq`` will reuse numbers and the canvas will drop later events."""
+    """Append one jsonl line.
+
+    A live runner passes its own counter because its state may be ahead of the
+    run file. A foreign process omits ``seq`` and allocates one atomically from
+    the persisted record under the run's cross-process lock.
+    """
+    # ``seq`` normally comes from the live runner state. A foreign process
+    # (reaper, responder, recovery tick) has no such shared counter, so allocate
+    # from the persisted value while holding the cross-process run lock.
     if seq is None:
-        seq = int((load_run(run_id) or {}).get("seq") or 0)
-    event = {
-        "runId": run_id,
-        "seq": seq,
-        "ts": int(time.time() * 1000),
-        "type": event_type,
-        "payload": payload or {},
-    }
-    with _lock:
-        path = events_path(run_id)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-        _patch_run(run_id, seq=seq + 1)
+        with workflow_lock(f"run-{run_id}"):
+            seq = int((_read_json(run_path(run_id), {}) or {}).get("seq") or 0)
+            event = {
+                "runId": run_id,
+                "seq": seq,
+                "ts": int(time.time() * 1000),
+                "type": event_type,
+                "payload": payload or {},
+            }
+            path = events_path(run_id)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+            _patch_run(run_id, seq=seq + 1)
+    else:
+        event = {
+            "runId": run_id,
+            "seq": seq,
+            "ts": int(time.time() * 1000),
+            "type": event_type,
+            "payload": payload or {},
+        }
+        with _lock:
+            path = events_path(run_id)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+            _patch_run(run_id, seq=seq + 1)
     sink = _event_sink
     if sink is not None:
         try:
