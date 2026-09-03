@@ -130,16 +130,43 @@ def holds(when: dict, inputs: list[dict]) -> bool:
 
 
 def between(scenario: dict, start: str, end: str) -> list[str]:
-    """Every step on a path from ``start`` to ``end`` — the body of a loop."""
-    body: set[str] = set()
+    """Every step on a path from ``start`` to ``end`` — the body of a loop.
 
-    def walk(node_id: str, path: list[str]) -> bool:
+    Every path, not the first one. ``any()`` over the recursion short-circuits
+    on the first branch that reaches ``end``, so a fan-out (start -> a, b -> end)
+    returned only whichever arm was walked first. The runner uses this list to
+    decide which already-PASSed steps are ``satisfied`` and can be skipped on a
+    rework take (see runner._compute_gate), so a dropped arm loses its skip and
+    silently repeats work the loop was not asking it to redo.
+
+    The visited set also bounds the walk: without it, stacked diamonds are
+    2**n distinct paths over a graph small enough to author by hand.
+    """
+    body: set[str] = set()
+    # Nodes already known to reach `end`. Cached both ways: a node's answer
+    # does not depend on the path taken to it, only on the graph below it.
+    reaches: dict[str, bool] = {}
+
+    def walk(node_id: str, path: tuple[str, ...]) -> bool:
         if node_id == end:
             body.update([*path, node_id])
             return True
         if node_id in path:
-            return False
-        return any(walk(target, [*path, node_id]) for target in succs(scenario, node_id))
+            return False  # a cycle back onto the current path is not a route
 
-    walk(start, [])
+        cached = reaches.get(node_id)
+        if cached is not None:
+            return cached
+
+        found = False
+        for target in succs(scenario, node_id):
+            # No short-circuit: every arm of a fan-out is part of the body.
+            if walk(target, (*path, node_id)):
+                found = True
+        if found:
+            body.update([*path, node_id])
+        reaches[node_id] = found
+        return found
+
+    walk(start, ())
     return list(body)
