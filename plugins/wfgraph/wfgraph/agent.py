@@ -28,6 +28,39 @@ def build_prompt(goal: str, context: str, payload: Any, profile: str | None = No
     return "\n\n".join(parts)
 
 
+def _verdict_line(raw: str) -> str | None:
+    """Read the verdict from a line that IS the verdict, scanning bottom-up.
+
+    ``build_prompt`` asks the model to "end with a line that is exactly PASS or
+    FAIL", so that is what we read. Scanning the whole reply for the word
+    instead turns ordinary English into a gate decision -- "I could not get it
+    to pass" is a sentence, not a verdict, and last-match-wins let such a
+    sentence silently override the real verdict line above it (a FAIL check
+    then routed down the gate's ship arm and the run reported success).
+
+    A line still counts when it wears light decoration: markdown emphasis,
+    a trailing period, a leading "Result:" label, or a trailing reason
+    ("FAIL: the migration is broken").
+    """
+    for line in reversed((raw or "").splitlines()):
+        stripped = line.strip().strip("*_`#>-").strip()
+        # Drop a leading label such as "Result:" or "Verdict:".
+        if ":" in stripped:
+            head, _, tail = stripped.rpartition(":")
+            if head.strip().lower() in {"result", "verdict", "status", "outcome"}:
+                stripped = tail.strip()
+        # "FAIL: the migration is broken" -- the verdict leads, a reason
+        # follows. Only the word before the colon is the verdict, so this
+        # cannot be triggered by a sentence that merely contains the word.
+        head, sep, _ = stripped.partition(":")
+        if sep and head.strip().strip("*_`").upper() in {"PASS", "FAIL"}:
+            return head.strip().strip("*_`").upper()
+        stripped = stripped.strip("*_`").strip(" .!").strip()
+        if stripped.upper() in {"PASS", "FAIL"}:
+            return stripped.upper()
+    return None
+
+
 def parse_result(text: str) -> dict[str, Any]:
     raw = (text or "").strip()
     verdict = None
@@ -44,9 +77,7 @@ def parse_result(text: str) -> dict[str, Any]:
             if isinstance(value, str) and value.upper() in {"PASS", "FAIL"}:
                 verdict = value.upper()
     if verdict is None:
-        tail = re.findall(r"\b(PASS|FAIL)\b", raw.upper())
-        if tail:
-            verdict = tail[-1]
+        verdict = _verdict_line(raw)
     return {"summary": raw[:400] or "done", "verdict": verdict, "output": output}
 
 
