@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,117 @@ class TestCompactionEventsStore(unittest.TestCase):
         )
         self.assertEqual([r[0] for r in rows], ["end"])
         self.assertEqual(json.loads(rows[0][1])["commit_status"], "committed")
+
+
+class TestEveryExitPathClosesTheBracket(unittest.TestCase):
+    """An unpaired `start` is the crash signal, so every NON-crash exit of
+    compress_context between the `start` write and the telemetry emitter must
+    write an `end`. Any uncovered early return makes a clean run look like a
+    crash and turns the orphan query into noise (#104099)."""
+
+    def test_no_unbracketed_early_return_between_start_and_emitter(self):
+        import ast
+        import inspect
+
+        from agent import conversation_compression as cc
+
+        src = inspect.getsource(cc.compress_context)
+        tree = ast.parse(textwrap.dedent(src)).body[0]
+
+        def _audits(node) -> bool:
+            """True when this statement records an audit `end` itself."""
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "_audit":
+                    if sub.args and isinstance(sub.args[0], ast.Constant) and sub.args[0].value == "end":
+                        return True
+            return False
+
+        # Helpers that own an emitter call, so returns fed by them are already bracketed.
+        emitting_helpers = {
+            "_run_summary_phase", "_candidate_rejected", "_emit_aborted_attempt_telemetry",
+            "_emit_compression_attempt_telemetry",
+        }
+        # Values produced by an emitting helper: returning one means that helper already
+        # wrote the `end` (verified for _run_summary_phase's abort_prompt path). NOTE:
+        # `commit` is deliberately NOT here — _commit_compaction owns no emitter, so its
+        # refusal return needs its own `end` and must stay biteable by this test.
+        emitting_values = {"phase"}
+        start_line = next(
+            n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_audit"
+            and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == "start"
+        )
+
+        # Walk statement lists so a return can be checked against its own block's guard.
+        unbracketed = []
+        for parent in ast.walk(tree):
+            body = getattr(parent, "body", None)
+            for block in (body, getattr(parent, "orelse", None), getattr(parent, "finalbody", None)):
+                if not isinstance(block, list):
+                    continue
+                for idx, stmt in enumerate(block):
+                    if not isinstance(stmt, ast.Return) or stmt.lineno <= start_line:
+                        continue
+                    preceding = block[:idx]
+                    if any(_audits(s) for s in preceding):
+                        continue
+                    guard = getattr(parent, "test", None)
+                    names = {
+                        n.func.id for n in ast.walk(guard or ast.Pass())
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    }
+                    if names & emitting_helpers:
+                        continue
+                    if any(
+                        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in emitting_helpers
+                        for s in preceding for n in ast.walk(s)
+                    ):
+                        continue
+                    # `return phase.<x>` / `return commit.<x>`: the helper that built the
+                    # value emitted on that path, so the bracket is already closed.
+                    if {
+                        n.value.id for n in ast.walk(stmt)
+                        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                    } & emitting_values:
+                        continue
+                    unbracketed.append(stmt.lineno)
+
+        self.assertEqual(
+            unbracketed, [],
+            f"compress_context returns at source lines {unbracketed} exit after the `start` audit row "
+            "without writing an `end` — a clean run there is indistinguishable from a crash.",
+        )
+
+    def test_parent_rotated_adoption_writes_an_end(self):
+        # Bites the adoption path specifically: reverting its _audit("end", ...) call
+        # reproduces the false orphan a clean rotated-parent run used to leave behind.
+        import ast
+        import inspect
+
+        from agent import conversation_compression as cc
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(cc.compress_context))).body[0]
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            assigns = [
+                n for n in ast.walk(node.test)
+                if isinstance(n, ast.Name) and n.id == "_adopted"
+            ]
+            if not assigns:
+                continue
+            audited = any(
+                isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "_audit"
+                and sub.args and isinstance(sub.args[0], ast.Constant) and sub.args[0].value == "end"
+                for stmt in node.body for sub in ast.walk(stmt)
+            )
+            self.assertTrue(
+                audited,
+                "the parent-rotated adoption return must write an audit `end`; without it a normal "
+                "concurrent-compression outcome is recorded as an orphaned (crash) start.",
+            )
+            return
+        self.fail("could not locate the `_adopted` early-return branch in compress_context")
 
 
 if __name__ == "__main__":

@@ -3630,6 +3630,10 @@ def compress_context(
     })
     _adopted = _adopt_if_parent_rotated(agent, lease, messages, system_message)
     if _adopted is not None:
+        # Adoption returns BEFORE the telemetry emitter, so close the bracket here: an
+        # unpaired `start` is the crash signal, and a rotated parent is a normal
+        # concurrent-compression outcome, not a crash.
+        _audit("end", {"commit_status": "aborted", "failure_class": "parent_rotated"})
         return _adopted
 
     # Snapshot durable cooldown only once we own the lease. Runs for force=True
@@ -3641,12 +3645,14 @@ def compress_context(
         # Durable cooldown read failed under a built-in compressor: force=True could
         # clear an unknown newer row before cancellation could restore it. Abort.
         lease.release()
+        _audit("end", {"commit_status": "aborted", "failure_class": "cooldown_read_failed"})
         return messages, _existing_system_prompt(agent, system_message)
 
     # Another path may have compacted this session in place since construction;
     # re-read breaker state under the lock, not the bind_session_state() snapshot.
     if not force and _automatic_compression_gate_blocks(agent, bypass_cooldown, include_cooldown=False):
         lease.release()
+        _audit("end", {"commit_status": "aborted", "failure_class": "breaker_blocked_under_lock"})
         return messages, _existing_system_prompt(agent, system_message)
 
     # Interrupts/redirects must not tear a summary in half. Use the explicit stop
@@ -3710,6 +3716,7 @@ def compress_context(
             attempt=attempt,
         )
         if commit.refused_prompt is not None:
+            _audit("end", {"commit_status": "aborted", "failure_class": "commit_refused"})
             return messages, commit.refused_prompt
         compressed = commit.compressed
         split_status = commit.split_status
