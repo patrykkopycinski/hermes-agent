@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,8 +48,40 @@ def _read_proc_field(pid: int, key: str) -> Optional[str]:
     return None
 
 
+def _proc_summary_psutil(pid: int, summary: Dict[str, Any]) -> None:
+    """Fill ``summary`` from psutil (no /proc — macOS, BSD, Windows). Mutates in place.
+
+    Kept to attribute lookups on an already-constructed ``Process``: measured ~0.1ms on macOS,
+    well inside the signal handler's <10ms budget. Never raises — a dead or unreadable parent
+    leaves the fields absent, exactly as the /proc path does.
+    """
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        return
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            for key, getter in (("name", proc.name), ("ppid", proc.ppid)):
+                with contextlib.suppress(Exception):  # noqa: BLE001 — signal-handler path
+                    summary[key] = getter()
+            with contextlib.suppress(Exception):  # noqa: BLE001
+                summary["uid"] = str(proc.uids().real)
+            with contextlib.suppress(Exception):  # noqa: BLE001
+                # truncate aggressively — these can be 4KB
+                summary["cmdline"] = " ".join(proc.cmdline()).strip()[:300]
+    except Exception:  # noqa: BLE001 — NoSuchProcess/AccessDenied/anything: never raise
+        return
+
+
 def _proc_summary(pid: int) -> Dict[str, Any]:
-    """Compact /proc/<pid> snapshot (pid, ppid, state, uid, cmdline); missing fields omitted."""
+    """Compact process snapshot (pid, ppid, state, uid, cmdline); missing fields omitted.
+
+    Reads /proc on Linux and falls back to psutil elsewhere. Without the fallback the parent
+    is ``{"pid": N}`` on macOS/Windows, so ``format_context_for_log`` prints
+    ``parent_name=? parent_cmdline='(unknown)'`` — the single most useful field for
+    "who killed my gateway" is blank on exactly the hosts where the question gets asked.
+    """
     summary: Dict[str, Any] = {"pid": pid}
     if pid <= 0:
         return summary
@@ -66,6 +99,8 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
         data = b""
     if data:  # truncate aggressively — these can be 4KB
         summary["cmdline"] = data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()[:300]
+    if "cmdline" not in summary:  # no /proc (macOS/BSD/Windows), or an unreadable entry
+        _proc_summary_psutil(pid, summary)
     return summary
 
 
@@ -119,12 +154,31 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     return ctx
 
 
+def _diagnostic_timeout_argv(timeout_seconds: float) -> list[str]:
+    """``timeout``-command prefix for the diagnostic, or ``[]`` when none exists.
+
+    GNU coreutils ``timeout`` is absent on stock macOS (it ships as ``gtimeout`` only with
+    Homebrew coreutils). Hardcoding ``timeout`` made ``Popen`` raise ``FileNotFoundError`` →
+    the whole diagnostic silently returned None, leaving a 0-byte log. Falling back to no
+    prefix keeps the snapshot on such hosts; the script's own per-command guards bound it.
+    """
+    for candidate in ("timeout", "gtimeout"):
+        if shutil.which(candidate):
+            return [candidate, f"{timeout_seconds:.0f}"]
+    return []
+
+
 def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
                            timeout_seconds: float = 5.0) -> Optional[int]:
     """Fire-and-forget ``ps``-style snapshot appended to ``log_path``: a detached subprocess (own
-    ``timeout`` so a wedged ``ps`` self-cleans) rather than a blocking ``ps aux`` in the signal
-    handler, which can freeze the loop >2s on a busy host. Returns the subprocess PID, or ``None``
-    on failure / Windows (bash -c is available on every POSIX target; Windows has no ps anyway).
+    ``timeout`` when available so a wedged ``ps`` self-cleans) rather than a blocking ``ps aux`` in
+    the signal handler, which can freeze the loop >2s on a busy host. Returns the subprocess PID,
+    or ``None`` on failure / Windows (bash -c is available on every POSIX target; Windows has no ps).
+
+    Every probe is platform-guarded with a fallback: BSD ``ps`` (macOS) rejects the GNU ``auxf
+    --sort=-pcpu`` spelling outright, and ``pstree``/``/proc``/``dmesg`` do not exist there. A
+    diagnostic that emits nothing on the developer's own machine is worse than no diagnostic —
+    it looks like the hook never ran.
     """
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,11 +189,22 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
     script = (
         f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
         "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
-        "echo '--- ps auxf (top 60 by cpu) ---'; ps auxf --sort=-pcpu 2>/dev/null | head -60; "
-        f"echo '--- pstree of self ---'; pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
-        "echo '--- /proc/loadavg ---'; cat /proc/loadavg 2>/dev/null || true; "
-        "echo '--- recent dmesg (oom/killed) ---'; "
-        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
+        # GNU spelling first, BSD/macOS spelling second — `ps auxf --sort=-pcpu` is a hard
+        # usage error on BSD, so the fallback must run when the first produces no rows.
+        "echo '--- ps (top 60 by cpu) ---'; "
+        "{ ps auxf --sort=-pcpu 2>/dev/null || ps aux -r 2>/dev/null; } | head -60; "
+        # Parent chain: pstree is Linux-only. On BSD walk PPIDs with ps -o ppid= (always present)
+        # so the killer's ancestry is still recorded.
+        f"echo '--- parent chain of self ---'; pstree -plau {os.getpid()} 2>/dev/null | head -40 || "
+        f"{{ p={os.getpid()}; n=0; while [ \"$p\" -gt 1 ] && [ \"$n\" -lt 12 ]; do "
+        "ps -o pid=,ppid=,user=,command= -p \"$p\" 2>/dev/null | head -1; "
+        "p=$(ps -o ppid= -p \"$p\" 2>/dev/null | tr -d ' '); [ -z \"$p\" ] && break; "
+        "n=$((n+1)); done; }; "
+        "echo '--- loadavg ---'; cat /proc/loadavg 2>/dev/null || uptime 2>/dev/null || true; "
+        "echo '--- recent kernel/service log (oom/killed) ---'; "
+        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || "
+        "log show --last 2m --predicate 'eventMessage CONTAINS \"jetsam\" OR eventMessage CONTAINS "
+        "\"memorystatus\"' 2>/dev/null | tail -20 || true; "
         "echo '=== end ==='"
     )
     try:  # O_APPEND so concurrent diagnostics from rapid signals don't trample each other
@@ -148,7 +213,7 @@ def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
         return None
     try:  # start_new_session: outlive systemd killing our cgroup (KillMode=control-group) to flush
         return subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script], stdout=fd,
+            [*_diagnostic_timeout_argv(timeout_seconds), "bash", "-c", script], stdout=fd,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
             close_fds=True).pid
     except OSError:
