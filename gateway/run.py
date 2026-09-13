@@ -3660,6 +3660,15 @@ class GatewayRunner(
             except Exception as exc:
                 logger.debug("state.db auto-maintenance skipped: %s", exc)
 
+        # Best-effort PASSIVE checkpoint: shrinks the WAL after startup writes so external readers
+        # that open state.db later are less likely to trigger a TRUNCATE rotation that replaces
+        # the WAL inode while this process still holds the old one (#109824).
+        if self._session_db is not None:
+            try:
+                self._session_db._db._try_wal_checkpoint()
+            except Exception as exc:
+                logger.debug("startup WAL checkpoint skipped: %s", exc)
+
         # Stale checkpoint repo cleanup; opt-in via checkpoints.auto_prune, idempotent via .last_prune.
         try:
             from hermes_cli.config import load_config as _load_full_config
