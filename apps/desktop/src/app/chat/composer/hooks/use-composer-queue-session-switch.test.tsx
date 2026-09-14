@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $parkedQueueSessions, $queuedPromptsBySession, enqueueQueuedPrompt } from '@/store/composer-queue'
-import { $activeSessionId, $busy, $messages, $selectedStoredSessionId, $sessions } from '@/store/session'
+import { $activeSessionId, $busy, $messages, $selectedStoredSessionId, $sessions, setSessionsLoading } from '@/store/session'
 import { $sessionStates, publishSessionState } from '@/store/session-states'
 
 import type { QueueEditState } from '../composer-utils'
@@ -75,9 +75,17 @@ describe('composer queue across a session switch', () => {
     $selectedStoredSessionId.set(null)
     $messages.set([])
     $busy.set(false)
+    // The auto-drain effect defers while session discovery runs — the sibling
+    // queue suite (use-composer-queue.test.tsx) clears the same flag. Leaving
+    // the atom at its `true` default parks every drain and times the settle
+    // test out (red on local-fixes since the gate landed).
+    setSessionsLoading(false)
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    setSessionsLoading(true)
+  })
 
   const startRunningTurnForA = () => {
     publishSessionState(RUNTIME_A, { ...createClientSessionState(STORED_A), busy: true })
