@@ -115,6 +115,34 @@ class LoopBreakerTests(unittest.TestCase):
         self.assertFalse(G._claims_completion(""))
         self.assertFalse(G._claims_completion("Phase 3 complete; starting Phase 4"))
 
+    def test_claims_regex_matches_qualified_criterion_phrasings(self):
+        """Regression: the 2026-09-15 ~150-turn loop.
+
+        The agent's stop line inserted an adjective between the quantifier and the noun
+        ("every additional criterion"), which the adjacency-only pattern missed, so the
+        loop-breaker counter never incremented and the goal ran to budget.
+        """
+        for claim in (
+            "The goal and every additional criterion are complete. "
+            "Stating so explicitly and stopping.",
+            "The goal and all 15 criteria are complete.",
+            "The goal and every criterion are complete.",
+            "The goal and all criteria are met.",
+            "The goal and each remaining acceptance criterion is satisfied.",
+        ):
+            with self.subTest(claim=claim):
+                self.assertTrue(G._claims_completion(claim))
+
+    def test_claims_regex_rejects_in_progress_phrasings(self):
+        for working in (
+            "All 15 criteria carry terminal evidence at HEAD; still verifying gate 4.",
+            "Working on criterion 7 now; the goal and remaining criteria are not yet complete.",
+            "I will state the criteria explicitly in the report.",
+            "Next step: run the gates.",
+        ):
+            with self.subTest(working=working):
+                self.assertFalse(G._claims_completion(working))
+
     def test_judge_prompt_includes_disposition_semantics(self):
         self.assertIn("DISPOSITIONS:", G.JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE)
         rendered = G.JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE.format(

@@ -50,7 +50,14 @@ DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS = 3
 _COMPLETION_CLAIM_RE = re.compile(
     r"\b(?:goal\s+(?:is\s+)?(?:complete|done)|all\s+(?:criteria|requirements)\s+met"
     r"|everything\s+is\s+done|complete\s*[—-]\s*stopping|done\s*[—-]\s*stopping"
-    r"|(?:goal\s+and\s+(?:all|every)\s+criteri(?:a|on))\s+(?:are|is)\s+complete)\b",
+    # "goal and every additional criterion are complete", "goal and all 15 criteria are met".
+    # Adjectives/counts may sit between the quantifier and the noun, and between the noun
+    # and the copula, so both gaps allow a few filler words instead of requiring adjacency.
+    r"|goal\s+and\s+(?:all|every|each)\s+(?:\w+\s+){0,3}criteri(?:a|on)\b"
+    r"(?:\s+\w+){0,3}\s+(?:are|is)\s+(?:complete|met|satisfied)"
+    # Echo of the continuation prompt's own stop instruction ("state so explicitly and stop"),
+    # which an agent reproduces verbatim when it believes it is finished.
+    r"|stat(?:e|ing)\s+so\s+explicitly\s+and\s+stop(?:ping)?)\b",
     re.IGNORECASE,
 )
 
