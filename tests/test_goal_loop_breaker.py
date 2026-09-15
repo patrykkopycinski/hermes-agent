@@ -45,6 +45,11 @@ class _Mgr:
         return "[Continuing toward your standing goal]"
 
     def _pause_decision(self, paused_reason, verdict, reason, message):
+        # Mirror the real GoalManager._pause_decision: it parks the state (via
+        # _pause_state) AND returns the decision dict. Without the status flip,
+        # a follow-up evaluate_after_turn runs as if the goal were still active.
+        self._state.status = "paused"
+        self._state.paused_reason = paused_reason
         return {
             "status": "paused",
             "paused_reason": paused_reason,
@@ -65,30 +70,46 @@ class LoopBreakerTests(unittest.TestCase):
     def _eval(self, mgr, response):
         return mgr._state and G.GoalManager.evaluate_after_turn(mgr, response)
 
-    def test_three_rejected_claims_pause_the_goal(self):
+    def test_second_rejected_claim_pauses_the_goal(self):
         mgr = _Mgr()
         with patch.object(G, "judge_goal", _stub_judge()), \
              patch.object(G.GoalManager, "_check_gates", return_value=None), \
              patch.object(G.GoalManager, "_save", lambda self: None):
             d1 = self._eval(mgr, CLAIM)
-            d2 = self._eval(mgr, CLAIM)
             self.assertEqual(d1["status"], "active")  # turn 1: still continuing
-            self.assertEqual(d2["status"], "active")  # turn 2: still continuing
+            d2 = self._eval(mgr, CLAIM)
+            self.assertEqual(d2["status"], "paused")  # turn 2: parked for the user
+            self.assertIn("completion claims rejected", d2.get("message", ""))
+            # A further claim must not re-trigger anything: the goal is already parked.
             d3 = self._eval(mgr, CLAIM)
-            self.assertEqual(d3["status"], "paused")  # turn 3: parked for the user
-            self.assertIn("completion claims rejected", d3.get("message", ""))
+            self.assertEqual(d3["status"], "paused")  # echoes parked status; no resurrection
+            self.assertEqual(mgr._state.completion_claims_rejected, 2)
 
     def test_non_claim_reply_resets_counter(self):
         mgr = _Mgr()
         with patch.object(G, "judge_goal", _stub_judge()), \
              patch.object(G.GoalManager, "_check_gates", return_value=None), \
              patch.object(G.GoalManager, "_save", lambda self: None):
-            self._eval(mgr, CLAIM)
-            self._eval(mgr, CLAIM)
+            d = self._eval(mgr, CLAIM)
+            self.assertEqual(d["status"], "active")  # 1 claim: below threshold
             self._eval(mgr, WORKING)  # genuine work: reset
             self.assertEqual(mgr._state.completion_claims_rejected, 0)
             d = self._eval(mgr, CLAIM)
             self.assertEqual(d["status"], "active")  # only 1 claim since reset
+
+    def test_paused_goal_ignores_further_replies(self):
+        """Once parked, further replies must not resurrect the loop or the counter."""
+        mgr = _Mgr()
+        with patch.object(G, "judge_goal", _stub_judge()), \
+             patch.object(G.GoalManager, "_check_gates", return_value=None), \
+             patch.object(G.GoalManager, "_save", lambda self: None):
+            self._eval(mgr, CLAIM)
+            self._eval(mgr, CLAIM)  # parks here
+            d = self._eval(mgr, WORKING)
+            self.assertEqual(d["status"], "paused")  # still parked; WORKING cannot reset it
+            d = self._eval(mgr, CLAIM)
+            self.assertEqual(d["status"], "paused")
+            self.assertEqual(mgr._state.completion_claims_rejected, 2)
 
     def test_judge_done_never_trips_breaker(self):
         mgr = _Mgr()
@@ -104,9 +125,8 @@ class LoopBreakerTests(unittest.TestCase):
         with patch.object(G, "judge_goal", _stub_judge()), \
              patch.object(G.GoalManager, "_check_gates", return_value=None), \
              patch.object(G.GoalManager, "_save", lambda self: None):
-            d = {}
-            for _ in range(3):
-                d = self._eval(mgr, CLAIM) or {}
+            d = self._eval(mgr, CLAIM)
+            d = self._eval(mgr, CLAIM)  # 2nd consecutive claim parks the goal
             self.assertIn("disposition_criterion", d.get("message", ""))
 
     def test_claims_regex_cases(self):
