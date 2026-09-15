@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $parkedQueueSessions, $queuedPromptsBySession, enqueueQueuedPrompt } from '@/store/composer-queue'
-import { $activeSessionId, $busy, $messages, $selectedStoredSessionId, $sessions, setSessionsLoading } from '@/store/session'
+import {
+  $activeSessionId,
+  $busy,
+  $messages,
+  $selectedStoredSessionId,
+  $sessions,
+  setSessionsLoading
+} from '@/store/session'
 import { $sessionStates, publishSessionState } from '@/store/session-states'
 
 import type { QueueEditState } from '../composer-utils'

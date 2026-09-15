@@ -156,16 +156,16 @@ describe('primary session view reads its own session slice', () => {
     expect(PRIMARY_SESSION_VIEW.$busy.get()).toBe(false)
   })
 
-
   // Same runtime-vs-stored skew as the busy cases, but for the metadata
   // fields. The outgoing session's cwd is what `droppedFileInlineRefs`
   // relativizes against, so a file dropped mid-switch resolved into the
   // PREVIOUS chat's workspace.
   it('does not paint the outgoing session cwd/model during a cold switch', () => {
-    publishSessionState(
-      'runtime-a',
-      { ...stateWith('runtime-a', 'session A turn', true), cwd: '/repo/a', model: 'model-a' }
-    )
+    publishSessionState('runtime-a', {
+      ...stateWith('runtime-a', 'session A turn', true),
+      cwd: '/repo/a',
+      model: 'model-a'
+    })
     $currentCwd.set('/leftover/from/previous')
     $currentModel.set('leftover-model')
     $activeSessionId.set('runtime-a')
@@ -176,10 +176,11 @@ describe('primary session view reads its own session slice', () => {
   })
 
   it('paints the slice cwd/model once it owns the selection', () => {
-    publishSessionState(
-      'runtime-a',
-      { ...stateWith('runtime-a', 'session A turn', true), cwd: '/repo/a', model: 'model-a' }
-    )
+    publishSessionState('runtime-a', {
+      ...stateWith('runtime-a', 'session A turn', true),
+      cwd: '/repo/a',
+      model: 'model-a'
+    })
     $activeSessionId.set('runtime-a')
     $selectedStoredSessionId.set('stored-runtime-a')
 

@@ -80,9 +80,7 @@ describe('composer busy gate across a session switch-back', () => {
     // ...so the composer's gate must not report idle in this window.
     const busyDuringSwitchBack = PRIMARY_SESSION_VIEW.$busy.get()
 
-    expect(
-      shouldAutoDrain({ isBusy: busyDuringSwitchBack, parked: false, queueLength: 1 })
-    ).toBe(false)
+    expect(shouldAutoDrain({ isBusy: busyDuringSwitchBack, parked: false, queueLength: 1 })).toBe(false)
 
     // And once the runtime rebinds, the slice takes over and still says busy.
     $activeSessionId.set('runtime-a')
