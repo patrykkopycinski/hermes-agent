@@ -40,6 +40,25 @@ _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
 # the goal_judge config. API/transport errors do NOT count — those are tracked separately below.
 # Guards against small models that cannot follow the strict JSON contract burning the whole budget.
 DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3
+# Loop-breaker: consecutive completion-claim/judge-CONTINUE disagreements before the goal
+# parks itself for the user (see GoalState.completion_claims_rejected).
+DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS = 3
+# Completion-assertion detector for the loop-breaker. Matches the terse self-declared
+# endings an agent produces when it believes the goal is done ("complete — stopping",
+# "all criteria met", "done, stopping"). Deliberately broad: a false positive only costs
+# one extra turn before the counter resets on a non-claim reply.
+_COMPLETION_CLAIM_RE = re.compile(
+    r"\b(?:goal\s+(?:is\s+)?(?:complete|done)|all\s+(?:criteria|requirements)\s+met"
+    r"|everything\s+is\s+done|complete\s*[—-]\s*stopping|done\s*[—-]\s*stopping"
+    r"|(?:goal\s+and\s+(?:all|every)\s+criteri(?:a|on))\s+(?:are|is)\s+complete)\b",
+    re.IGNORECASE,
+)
+
+
+def _claims_completion(response: str) -> bool:
+    if not response:
+        return False
+    return bool(_COMPLETION_CLAIM_RE.search(response))
 # Consecutive transport failures (401, timeout, DNS) before auto-pause: a broken API key returns
 # 401 every call and must not spend every turn on an unreachable judge.
 DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
@@ -185,6 +204,10 @@ JUDGE_USER_PROMPT_TEMPLATE = (
 )
 
 # With /subgoal criteria: the judge must see ALL of them met, not just the original goal.
+# A criterion may carry a "[DISPOSITION: ... — evidence: ...]" header (goal_criteria tool,
+# action=disposition_criterion): the agent attached an evidence-backed resolution —
+# satisfied via a different mechanism than the literal names, or proof the literal is
+# impossible in this environment. The original text is preserved after the header.
 JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "Goal:\n{goal}\n\n"
     "Additional criteria the user added mid-loop (all must also be "
@@ -200,6 +223,15 @@ JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "ANY criterion lacks specific evidence in the response, the goal "
     "is NOT done — return CONTINUE (or WAIT if blocked on a listed "
     "background process).\n\n"
+    "DISPOSITIONS: a criterion beginning with '[DISPOSITION:' has an "
+    "attached resolution. Evaluate the criterion as SATISFIED when "
+    "the disposition is 'evidence_attached' or "
+    "'satisfied_via_deviation' and the disposition's own evidence "
+    "(command + raw output, or the stated mechanism) is concrete — "
+    "do NOT keep demanding the dispositioned literal mechanism when "
+    "the disposition proves it wrong or impossible. A disposition "
+    "with vague evidence ('trust me', no output excerpt) does NOT "
+    "satisfy its criterion.\n\n"
     "Is the goal AND every additional criterion satisfied?"
 )
 
@@ -404,6 +436,11 @@ class GoalState:
     consecutive_transport_failures: int = 0   # judge API/transport errors in a row
     # User-added criteria (/subgoal). Both the judge and continuation prompts include them.
     subgoals: List[str] = field(default_factory=list)
+    # Loop-breaker: consecutive judge CONTINUE verdicts where the agent's reply asserted
+    # completion (regex on 'complete/done/stopping') while the judge disagreed. A persistent
+    # disagreement means either an unsatisfiable criterion literal or a judge that can't parse
+    # the evidence — both need a human, not more identical turns (observed: ~30-turn loop).
+    completion_claims_rejected: int = 0
     # Wait barrier (judge ``wait`` verdict or ``/goal wait``): parks the loop instead of re-poking the
     # agent into busy-work. pid → until exit; session → until that process_registry session's OWN
     # trigger fires (exit OR watch_patterns match — preferred for watchers that signal mid-run);
@@ -429,7 +466,7 @@ class GoalState:
     def from_json(cls, raw: str) -> "GoalState":
         data = json.loads(raw)
         raw_subgoals = data.get("subgoals") or []
-        ints = {k: int(data.get(k) or 0) for k in ("turns_used", "consecutive_parse_failures", "consecutive_transport_failures", "waiting_on_delegations")}
+        ints = {k: int(data.get(k) or 0) for k in ("turns_used", "consecutive_parse_failures", "consecutive_transport_failures", "waiting_on_delegations", "completion_claims_rejected")}
         floats = {k: float(data.get(k) or 0.0) for k in ("created_at", "last_turn_at", "waiting_until", "waiting_since")}
         return cls(
             goal=data.get("goal", ""),
@@ -1493,8 +1530,8 @@ class GoalManager:
             self._save()
             return _decision("done", False, None, "done", reason, f"✓ Goal achieved: {reason}")
 
-        # Persistent judge failures (API unreachable / unparseable output) auto-pause and point at the
-        # goal_judge config so a broken judge can't burn the whole turn budget.
+        # Persistent judge failures (API unreachable / unparseable output) auto-pause and point at
+        # the goal_judge config so a broken judge can't burn the whole turn budget.
         n_tx, n_parse = state.consecutive_transport_failures, state.consecutive_parse_failures
         if n_tx >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
             return self._pause_decision(
@@ -1509,6 +1546,27 @@ class GoalManager:
                 f"⏸ Goal paused — the judge model ({n_parse} turns) isn't returning the required JSON verdict. "
                 "Route the judge to a stricter model in "
                 + _JUDGE_CONFIG_HINT.format(provider="openrouter", model="google/gemini-3-flash-preview"),
+            )
+
+        # Loop-breaker: the agent keeps asserting completion while the judge keeps ruling
+        # CONTINUE. Re-sending the same goal prompt produces the same terse claim (observed:
+        # ~30 identical turns). After DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS consecutive
+        # disagreements, park for the user instead of burning the remaining budget — the
+        # usual cause is a criterion whose literal cannot be satisfied (fix via
+        # goal_criteria disposition_criterion, /subgoal, or re-scoping).
+        claimed_complete = _claims_completion(last_response)
+        state.completion_claims_rejected = (
+            state.completion_claims_rejected + 1 if claimed_complete else 0
+        )
+        if state.completion_claims_rejected >= DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS:
+            return self._pause_decision(
+                f"agent claimed completion {state.completion_claims_rejected} turns in a row but the judge "
+                f"keeps ruling continue: {reason}",
+                "continue", reason,
+                f"⏸ Goal paused — {state.completion_claims_rejected} consecutive completion claims rejected by "
+                "the judge. Usually a criterion whose literal can't be satisfied as written (attach an "
+                "evidence-backed disposition via goal_criteria disposition_criterion, amend the criterion, or "
+                "re-scope with /goal set). Override with /goal resume.",
             )
 
         if state.turns_used >= state.max_turns:
