@@ -41,8 +41,10 @@ _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
 # Guards against small models that cannot follow the strict JSON contract burning the whole budget.
 DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3
 # Loop-breaker: consecutive completion-claim/judge-CONTINUE disagreements before the goal
-# parks itself for the user (see GoalState.completion_claims_rejected).
-DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS = 3
+# parks itself for the user (see GoalState.completion_claims_rejected). 2, not 3: the first
+# rejected claim already proves the agent and judge disagree; a second confirms it isn't a
+# fluke, so parking at 2 caps the waste at one turn instead of two.
+DEFAULT_MAX_REJECTED_COMPLETION_CLAIMS = 2
 # Completion-assertion detector for the loop-breaker. Matches the terse self-declared
 # endings an agent produces when it believes the goal is done ("complete — stopping",
 # "all criteria met", "done, stopping"). Deliberately broad: a false positive only costs
