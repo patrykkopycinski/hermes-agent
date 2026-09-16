@@ -226,6 +226,40 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     return ("unknown", None)
 
 
+def _claimer_gateway_is_gone(claimer: Optional[str]) -> bool:
+    """True when ``claimer`` (``host:pid``) names a *local* dispatcher process
+    that is no longer alive.
+
+    A worker is only reapable by the dispatcher that spawned it:
+    ``_recent_worker_exits`` is in-memory and ``os.waitpid`` only reaps one's
+    own children. A gateway restart therefore makes every in-flight worker
+    unreapable by its successor — ``_classify_worker_exit`` returns ``unknown``
+    for all of them and each card is charged a failure it never earned, so two
+    sweeps reach ``failure_limit`` and block the whole board at once.
+
+    The claim lock already carries what's needed to tell that apart from a real
+    crash: it records ``host:pid`` (``kanban_db._claimer_id``). A local claimer
+    that is gone means the claiming dispatcher died; a foreign host is never
+    judged from here (its PIDs are meaningless locally), so remote claims keep
+    the old behaviour.
+    """
+    if not claimer:
+        return False
+    if not str(claimer).startswith(_kb._host_prefix()):
+        # Another host's PID namespace is meaningless here — stay conservative.
+        return False
+    try:
+        claimer_pid = int(str(claimer).split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        return False
+    if claimer_pid == os.getpid():
+        # Our own dispatcher is obviously alive; nothing was orphaned.
+        return False
+    # ``_pid_alive`` (not a bare ``os.kill``) — on Windows ``sig=0`` is a
+    # CTRL_C_EVENT broadcast, and it also treats unreaped zombies as dead.
+    return not _pid_alive(claimer_pid)
+
+
 def reap_worker_zombies() -> "list[int]":
     """Reap all zombie children without blocking; returns reaped PIDs. No-op on Windows."""
     reaped: "list[int]" = []
@@ -1012,6 +1046,20 @@ def _classify_dead_worker_exit(pid: int, claimer: Optional[str]) -> _DeadWorker:
         error_text = f"pid {pid} exited with code {code}"
     elif kind == "signaled":
         error_text = f"pid {pid} killed by signal {code}"
+    elif kind == "unknown" and _claimer_gateway_is_gone(claimer):
+        # The dispatcher that spawned this worker is gone, so its exit status
+        # was never reapable here — "unknown" reflects the restart, not the
+        # task. Requeue like the quota wall does, WITHOUT counting a failure:
+        # charging one here (and again on the next sweep) trips
+        # ``failure_limit`` and blocks every in-flight card on the board.
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} orphaned by dispatcher restart (claimer {claimer} is gone) "
+            "— requeued without counting a failure",
+            "rate_limited",
+            {"pid": pid, "claimer": claimer, "orphaned_by_restart": True},
+            rate_limited=True,
+        )
     else:
         error_text = f"pid {pid} not alive"
     event_payload = {"pid": pid, "claimer": claimer}
