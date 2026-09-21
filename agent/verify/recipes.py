@@ -38,13 +38,17 @@ class Recipe:
     port: int | None = None
     readiness_path: str = "/"
     evidence: list[str] = field(default_factory=list)
+    phase_timeout: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "name": self.name, "kind": self.kind, "bootstrap": list(self.bootstrap),
             "build": list(self.build), "test": list(self.test), "start": self.start,
             "port": self.port, "readinessPath": self.readiness_path, "evidence": list(self.evidence),
         }
+        if self.phase_timeout is not None:
+            data["phaseTimeout"] = self.phase_timeout
+        return data
 
     @classmethod
     def from_dict(cls, raw: Any) -> "Recipe | None":
@@ -64,6 +68,18 @@ class Recipe:
         if isinstance(port_raw, str) and port_raw.strip().isdigit():
             port_raw = int(port_raw.strip())
         readiness = raw.get("readinessPath") or raw.get("readiness_path") or "/"
+        timeout_raw = raw.get("phaseTimeout") or raw.get("phase_timeout")
+        if isinstance(timeout_raw, str) and timeout_raw.strip():
+            try:
+                timeout_raw = float(timeout_raw.strip())
+            except ValueError:
+                timeout_raw = None
+        # bool is an int subclass; a stray `true` must not become a 1-second budget.
+        timeout = (
+            float(timeout_raw)
+            if isinstance(timeout_raw, (int, float)) and not isinstance(timeout_raw, bool) and timeout_raw > 0
+            else None
+        )
 
         return cls(
             name=name.strip(), kind=kind.strip(),
@@ -74,6 +90,7 @@ class Recipe:
             build=_as_strings(raw.get("build") or raw.get("buildCommands")),
             test=_as_strings(raw.get("test") or raw.get("testCommands")),
             evidence=_as_strings(raw.get("evidence")),
+            phase_timeout=timeout,
         )
 
 

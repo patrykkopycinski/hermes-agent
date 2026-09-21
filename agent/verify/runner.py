@@ -208,7 +208,7 @@ def _compose_live_state_reason(root: Path) -> str | None:
 
 def run_verify(
     root: Path, recipe: Recipe, phases: tuple[str, ...] | list[str] | None = None,
-    phase_timeout: float = DEFAULT_PHASE_TIMEOUT, ready_timeout: float = DEFAULT_READY_TIMEOUT,
+    phase_timeout: float | None = None, ready_timeout: float | None = None,
     skip_start: bool = False, port_override: int | None = None, stop_on_failure: bool = True,
     on_output: Callable[[str], None] | None = None,
 ) -> VerifyResult:
@@ -225,6 +225,13 @@ def run_verify(
     root = Path(root)
     selected = tuple(phases) if phases else PHASE_ORDER + ("start",)
     result = VerifyResult(recipe_name=recipe.name)
+    # Explicit caller timeout wins over the recipe's saved budget, which wins over
+    # default. `run_verify_command` only forwards `--timeout` when the user
+    # actually typed it, so a manifest-set budget survives bare `hermes verify`.
+    if phase_timeout is None:
+        phase_timeout = recipe.phase_timeout if recipe.phase_timeout is not None else DEFAULT_PHASE_TIMEOUT
+    if ready_timeout is None:
+        ready_timeout = DEFAULT_READY_TIMEOUT
 
     mutating = ("build" in selected) or ("start" in selected and not skip_start)
     if recipe.kind == "compose" and mutating:

@@ -41,10 +41,10 @@ def build_verify_parser(subparsers, *, cmd_verify: Callable) -> None:
     verify_parser.add_argument(
         "--port", type=int, default=None, help="Override the port used for the readiness poll")
     verify_parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_PHASE_TIMEOUT,
-        help=f"Per-phase timeout in seconds (default: {DEFAULT_PHASE_TIMEOUT:.0f})")
+        "--timeout", type=float, default=None,
+        help=f"Per-phase timeout in seconds (manifest phaseTimeout, else {DEFAULT_PHASE_TIMEOUT:.0f})")
     verify_parser.add_argument(
-        "--ready-timeout", type=float, default=DEFAULT_READY_TIMEOUT,
+        "--ready-timeout", type=float, default=None,
         help=f"Readiness poll timeout in seconds (default: {DEFAULT_READY_TIMEOUT:.0f})")
     add_json_flag(verify_parser, "Emit a machine-readable JSON result")
     verify_parser.set_defaults(func=cmd_verify)
