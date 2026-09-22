@@ -88,6 +88,24 @@ class SpillIfOversizedTests(unittest.TestCase):
             )
 
 
+    def test_newline_free_payload_never_previews_a_partial_line(self):
+        """A window holding no newline is one partial line — drop it, don't ship it raw.
+
+        Regression: the line-boundary helpers returned the slice unchanged when
+        it contained no newline, so a single-line payload still leaked a
+        mid-word fragment into the prompt — the exact shape the line-boundary
+        rule exists to prevent.
+        """
+        text = "entry-without-any-newlines " * 400
+        cfg = self._cfg(max_chars=1000, preview_head=200, preview_tail=200)
+        out = hos.spill_if_oversized(
+            text, session_id="no-newline", source="probe", config=cfg
+        )
+
+        self.assertNotIn("--- head ---", out)
+        self.assertNotIn("--- tail ---", out)
+        self.assertIn("output truncated", out)
+
     def test_default_directory_uses_hermes_home(self):
         """When no directory override, spill under HERMES_HOME/hook_outputs."""
         test_home = tempfile.mkdtemp(prefix="hermes-home-")
