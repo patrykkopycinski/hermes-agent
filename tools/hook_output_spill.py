@@ -113,21 +113,37 @@ def spill_if_oversized(
     # rather than returned raw — returning it silently voided this guarantee for
     # single-line payloads. The header still carries the char count and the path,
     # so a preview-less placeholder loses nothing but the excerpt.
-    def _head_upto_newline(s: str) -> str:
-        # keep whole lines only; a trailing partial line is dropped.
+    #
+    # Both helpers only apply this rule to a slice that is ACTUALLY a cut. When the
+    # window reaches the true start/end of ``text`` (head >= total, or tail >= total),
+    # ``s`` already IS the whole document — snapping it to a newline would silently
+    # drop a completely legitimate first/last line just because the source text
+    # doesn't happen to end with '\n' (normal for most content). ``is_cut=False``
+    # returns the slice untouched in that case; it holds no artificial cut to hide.
+    def _head_upto_newline(s: str, *, is_cut: bool) -> str:
+        # keep whole lines only; a trailing partial line is dropped — but only
+        # when the window's end is an artificial cut, not the real end of text.
+        if not is_cut:
+            return s
         idx = s.rfind("\n")
         return "" if idx == -1 else s[:idx + 1]
 
-    def _tail_from_newline(s: str) -> str:
-        # the tail slice may START mid-line; drop everything before its '\n'.
+    def _tail_from_newline(s: str, *, is_cut: bool) -> str:
+        # the tail slice may START mid-line; drop everything before its '\n' —
+        # but only when the window's start is an artificial cut, not the real
+        # start of text (tail window covering the whole document).
+        if not is_cut:
+            return s
         idx = s.find("\n")
         return "" if idx == -1 else s[idx + 1:]
 
-    if head > 0 and (head_part := _head_upto_newline(text[:head]).rstrip("\n")):
+    head_is_cut = head < total
+    if head > 0 and (head_part := _head_upto_newline(text[:head], is_cut=head_is_cut).rstrip("\n")):
         parts.extend(["--- head ---", head_part])
     if tail > 0 and total > head:
-        tail_slice = text[-tail:] if tail < total else text
-        if tail_part := _tail_from_newline(tail_slice).rstrip("\n"):
+        tail_is_cut = tail < total
+        tail_slice = text[-tail:] if tail_is_cut else text
+        if tail_part := _tail_from_newline(tail_slice, is_cut=tail_is_cut).rstrip("\n"):
             parts.extend(["--- tail ---", tail_part])
     return "\n".join(parts)
 

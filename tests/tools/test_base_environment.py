@@ -89,6 +89,28 @@ class TestBoundedOutputCollector:
         assert rendered.endswith("[Command timed out after 1s]")
         assert "[OUTPUT TRUNCATED" in rendered
 
+    @pytest.mark.parametrize("max_chars", [1, 2, 3, 5, 10])
+    def test_tail_limit_never_hits_zero_for_any_positive_max_chars(self, max_chars):
+        """``_tail_limit = max_chars - int(max_chars * 0.4)`` — verify the newest
+        entry is always retained even at the smallest budgets.
+
+        Investigated claim: ring-buffer tail eviction could render empty when the
+        budget is exhausted, because ``_tail_limit`` might hit 0 while entries still
+        hold content. It cannot: ``self.max_chars = max(1, int(max_chars))`` floors
+        the budget at 1, and for every integer n >= 1, ``int(n * 0.4) < n`` (floor of
+        a proper fraction of a positive integer is always strictly smaller), so
+        ``_tail_limit = n - int(n * 0.4) >= 1``. This test locks that invariant and
+        proves the newest streamed content is never evicted into an empty render.
+        """
+        collector = _BoundedOutputCollector(max_chars)
+        assert collector._tail_limit >= 1
+
+        collector.append("NEWEST")
+        rendered = collector.render()
+        # However tiny the budget, some content must render — never a blank string
+        # while real bytes were streamed.
+        assert rendered != ""
+
 
 class TestWrapCommand:
     def test_basic_shape(self):

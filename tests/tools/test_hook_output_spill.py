@@ -106,6 +106,108 @@ class SpillIfOversizedTests(unittest.TestCase):
         self.assertNotIn("--- tail ---", out)
         self.assertIn("output truncated", out)
 
+    def test_tail_window_starting_mid_word_never_leaks_a_partial_line(self):
+        """The tail slice (``text[-tail:]``) can start mid-word even in a genuinely
+        multi-line payload; the fragment before its first newline must be dropped,
+        not shipped raw.
+
+        Regression: ``_tail_from_newline`` correctly drops everything up to the
+        first '\\n' when the tail window IS a real cut, but this must hold even
+        when that first "line" inside the window begins mid-word (not just when
+        the window holds no newline at all — that narrower case was 467ef51's fix).
+        """
+        lines = [f"filler-line-{i}-padding-content-xyz" for i in range(50)]
+        text = "\n".join(lines)
+        # Choose a tail window whose start lands inside a line's characters, not
+        # exactly on a line boundary, and whose window is a genuine cut (tail < total).
+        tail_window = len(lines[-1]) + len(lines[-2]) // 2
+        cfg = self._cfg(max_chars=100, preview_head=0, preview_tail=tail_window)
+        out = hos.spill_if_oversized(
+            text, session_id="mid-word-tail", source="probe", config=cfg
+        )
+        lineset = set(lines)
+        section = None
+        for line in out.split("\n"):
+            if line in ("--- head ---", "--- tail ---"):
+                section = line
+                continue
+            if line.startswith("[") or section is None or not line.strip():
+                continue
+            self.assertIn(
+                line, lineset,
+                f"{section} leaked a mid-word fragment: {line[:60]!r}",
+            )
+
+    def test_single_line_payload_never_previews_a_raw_fragment(self):
+        """A single-line (no-newline) payload over the cap must never ship a raw
+        char-boundary fragment for either window — it is dropped, per 467ef51."""
+        text = "x" * 5000
+        cfg = self._cfg(max_chars=100, preview_head=30, preview_tail=30)
+        out = hos.spill_if_oversized(
+            text, session_id="single-line", source="probe", config=cfg
+        )
+        self.assertNotIn("--- head ---", out)
+        self.assertNotIn("--- tail ---", out)
+        self.assertIn("output truncated", out)
+
+    def test_head_plus_tail_equal_total_keeps_whole_boundary_lines(self):
+        """When ``preview_head + preview_tail`` exactly equals the payload length,
+        the head window ends exactly where the tail window begins — both windows
+        must still resolve to whole lines with no overlap-induced fragment."""
+        text = "AAAA-first-line\nBBBB-second-line\nCCCC-third-line-final"
+        total = len(text)
+        head = 20
+        tail = total - head
+        self.assertEqual(head + tail, total)
+        cfg = self._cfg(max_chars=5, preview_head=head, preview_tail=tail)
+        out = hos.spill_if_oversized(
+            text, session_id="boundary-exact", source="probe", config=cfg
+        )
+        lineset = set(text.split("\n"))
+        section = None
+        for line in out.split("\n"):
+            if line in ("--- head ---", "--- tail ---"):
+                section = line
+                continue
+            if line.startswith("[") or section is None or not line.strip():
+                continue
+            self.assertIn(line, lineset)
+        # Both windows are populated (head resolves to the whole first line;
+        # tail resolves to the whole final line).
+        self.assertIn("--- head ---", out)
+        self.assertIn("--- tail ---", out)
+        self.assertIn("AAAA-first-line", out)
+        self.assertIn("CCCC-third-line-final", out)
+
+    def test_tail_window_covering_entire_text_keeps_the_genuine_first_line(self):
+        """When ``preview_tail`` >= total length, ``text[-tail:]`` is the WHOLE
+        document, not an artificial cut — the genuine first line must survive,
+        even though it has no preceding newline to anchor on.
+
+        Regression: line-boundary snapping was applied unconditionally, so a tail
+        window that reached the true start of the document was still treated as if
+        it might start mid-line, silently dropping the real first line.
+        """
+        text = "genuine-first-line-not-a-cut\nsecond-line\nthird-line-final"
+        cfg = self._cfg(max_chars=5, preview_head=0, preview_tail=len(text) + 100)
+        out = hos.spill_if_oversized(
+            text, session_id="full-tail-window", source="probe", config=cfg
+        )
+        self.assertIn("--- tail ---", out)
+        self.assertIn("genuine-first-line-not-a-cut", out)
+
+    def test_head_window_covering_entire_text_keeps_the_genuine_last_line(self):
+        """Symmetric case: ``preview_head`` >= total length means ``text[:head]``
+        is the WHOLE document. The genuine last line (even with no trailing
+        newline, the normal shape for most text) must survive."""
+        text = "line-one\nline-two\nline-three-no-trailing-newline"
+        cfg = self._cfg(max_chars=5, preview_head=len(text) + 50, preview_tail=0)
+        out = hos.spill_if_oversized(
+            text, session_id="full-head-window", source="probe", config=cfg
+        )
+        self.assertIn("--- head ---", out)
+        self.assertIn("line-three-no-trailing-newline", out)
+
     def test_default_directory_uses_hermes_home(self):
         """When no directory override, spill under HERMES_HOME/hook_outputs."""
         test_home = tempfile.mkdtemp(prefix="hermes-home-")
