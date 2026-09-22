@@ -116,6 +116,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # install on the sealed Docker image (durable-target only).
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai>=2.0.10,<3",),
+    "memory.es_memory": ("elasticsearch>=9,<10",),
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.8",),

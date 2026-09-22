@@ -88,9 +88,19 @@ def _honcho(seen, tmp_path):
     return [HonchoMemoryProvider()._spawn_write(_probe_home(seen), "honcho-test", "failed %s")]
 
 
+def _es_memory(seen, tmp_path):
+    import plugins.memory.es_memory as es_memory
+
+    p = es_memory.EsMemoryProvider()
+    p._active = True
+    p._recall = lambda query: (seen.setdefault("home", get_hermes_home()) and "text", 1)
+    p.queue_prefetch("remember this")
+    return [p._prefetch_thread]
+
+
 _PROVIDERS = {
     "mem0": _mem0, "retaindb": _retaindb, "byterover": _byterover, "supermemory": _supermemory,
-    "openviking": _openviking, "hindsight": _hindsight, "honcho": _honcho,
+    "openviking": _openviking, "hindsight": _hindsight, "honcho": _honcho, "es_memory": _es_memory,
 }
 
 

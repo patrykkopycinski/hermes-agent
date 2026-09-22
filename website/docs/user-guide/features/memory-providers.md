@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, Memori, Elasticsearch"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 10 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, memori, es_memory
 ```
 
 ## How It Works
@@ -671,6 +671,47 @@ hermes memory setup
 
 ---
 
+### Elasticsearch
+
+Episodic turn capture plus long-term facts in your own Elasticsearch cluster, recalled through `semantic_text`/ELSER with a BM25 fallback for clusters that have no inference endpoint.
+
+| | |
+|---|---|
+| **Best for** | Teams already running Elastic who want memory in a cluster they own and can query directly |
+| **Requires** | An Elasticsearch 9.x cluster + API key. `elasticsearch` SDK (lazy-installed). ELSER inference endpoint optional. |
+| **Data storage** | Your Elasticsearch cluster |
+| **Cost** | Free (self-hosted) / Elastic Cloud pricing |
+
+**Tools:** `es_memory_search` (semantic or lexical search over this profile's index, optionally restricted to past turns or stored facts)
+
+**Setup:**
+```bash
+hermes memory setup    # select "es_memory"
+# Or manually:
+hermes config set memory.provider es_memory
+```
+
+**Config:** `$HERMES_HOME/es_memory/config.json` (credentials go to the profile's `.env`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `url` | — | Endpoint URL. One of `url`/`cloud_id` is required (`ES_MEMORY_URL`) |
+| `cloud_id` | — | Elastic Cloud deployment ID, used when `url` is blank (`ES_MEMORY_CLOUD_ID`) |
+| `api_key` | — | Preferred credential (`ES_MEMORY_API_KEY`) |
+| `username` / `password` | `elastic` / — | Basic auth; ignored when an API key is set |
+| `retrieval` | `auto` | `auto`, `semantic`, `hybrid` (RRF), or `bm25` |
+| `inference_id` | `.elser-2-elasticsearch` | Inference endpoint behind the `semantic_text` field |
+| `index_prefix` | `hermes-memory` | First segment of the index name |
+| `top_k` | `8` | Documents injected per recall |
+
+**Key features:**
+- One index per profile (`<prefix>-<identity>-<profile hash>`) holding both episodic turns and long-term facts
+- `auto` retrieval probes the cluster at bootstrap and degrades to BM25 when `semantic_text` is unavailable, rather than failing every recall
+- Superseded facts flip `active: false` instead of being deleted, so history stays auditable and queryable in Kibana
+- Content-derived document ids make retried writes idempotent and let a `replace` supersede exactly the entry it names
+
+---
+
 ## Provider Comparison
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
@@ -684,14 +725,15 @@ hermes memory setup
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud/Self-hosted | Free/Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
 | **Memori** | Cloud | Free/Paid | 5 | `hermes-memori` | Tool-aware memory + structured recall |
+| **Elasticsearch** | Self-hosted/Cloud | Free/Elastic pricing | 1 | `elasticsearch` | ELSER semantic_text recall with BM25 fallback |
 
 ## Profile Isolation
 
 Each provider's data is isolated per [profile](../profiles.md):
 
 - **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
-- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
-- **Cloud providers** (RetainDB) auto-derive profile-scoped project names
+- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory, Elasticsearch) store config in `$HERMES_HOME/` so each profile has its own credentials
+- **Cloud providers** (RetainDB) auto-derive profile-scoped project names; Elasticsearch additionally hashes the profile home into the index name, so two profiles sharing a cluster never share an index
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
 
 ## Providers Moving to the Plugin Catalog
