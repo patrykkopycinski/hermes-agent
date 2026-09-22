@@ -44,6 +44,35 @@ interface UseComposerSubmitArgs {
   stashAt: (scope: string | null, text?: string, attachments?: ComposerAttachment[]) => void
 }
 
+/** Characters kept either side of the divergence point in a shortfall report. */
+const DOM_SHORTFALL_WINDOW = 16
+
+/**
+ * Report an editor that serialized SHORTER than the draft mirror at Enter.
+ *
+ * Goes out at error level because `renderer-log.ts` forwards only level 3 to
+ * `desktop.log`; warn is dropped on the floor. Only a window around the point
+ * the two texts diverge is recorded, never either text in full — a diagnostic
+ * must not put whole messages on disk.
+ */
+function reportComposerDomShortfall(domText: string, draft: string): void {
+  let divergence = 0
+
+  while (divergence < domText.length && domText[divergence] === draft[divergence]) {
+    divergence += 1
+  }
+
+  const around = (value: string) =>
+    JSON.stringify(value.slice(Math.max(0, divergence - DOM_SHORTFALL_WINDOW), divergence + DOM_SHORTFALL_WINDOW))
+
+  console.error(
+    `[composer:dom-shortfall] domLen=${domText.length} draftLen=${draft.length} ` +
+      `strictPrefix=${draft.startsWith(domText)} divergenceAt=${divergence} ` +
+      `stoppedBefore=${JSON.stringify(draft.slice(divergence, divergence + 1))} ` +
+      `domAround=${around(domText)} draftAround=${around(draft)}`
+  )
+}
+
 /**
  * The composer's submit engine — the orchestration seam where the draft and
  * queue meet. `submitDraft` is the one decision tree (queue-edit save · slash-
@@ -208,6 +237,14 @@ export function useComposerSubmit({
       const domText = composerPlainText(editor)
 
       if (domText !== draftRef.current) {
+        // Observation only — the DOM still wins. A DOM shorter than the mirror is
+        // the one shape a mid-commit serialization and a tail deletion both
+        // produce, and no state available here tells them apart; #118968 guessed
+        // and re-sent deleted text. Record the shape until real data says which.
+        if (domText.length < draftRef.current.length) {
+          reportComposerDomShortfall(domText, draftRef.current)
+        }
+
         draftRef.current = domText
         setComposerText(domText)
       }
