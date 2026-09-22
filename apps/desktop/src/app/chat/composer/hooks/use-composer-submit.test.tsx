@@ -127,6 +127,7 @@ function renderSubmitHook({
 
   return {
     clearDraft,
+    editorRef,
     hook,
     onCancel,
     onSteer,
@@ -633,5 +634,43 @@ describe('useComposerSubmit with a blocking prompt parked on the session', () =>
 
     // The approval card is still the turn's owner; only its own buttons answer it.
     expect(hasBlockingPromptRequest('runtime-session')).toBe(true)
+  })
+})
+
+// The live editor — not `draftRef` — decides what Enter submits. `draftRef` is a
+// coalesced per-frame mirror (see `liveComposerDraft` in composer-utils.ts), so
+// within a frame of a deletion it still holds the pre-deletion text. Any future
+// attempt to prefer the mirror when it is LONGER than the DOM resurrects text the
+// user removed: a tail deletion is a strict prefix, and an emptied editor is a
+// prefix of everything, so a cleared composer would re-send the previous message
+// on every Enter.
+describe('useComposerSubmit live-editor authority over the draft mirror', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('submits the shortened text when the user deleted the tail', () => {
+    const { editorRef, hook, onSubmit } = renderSubmitHook({ text: 'old long draft text' })
+
+    editorRef.current!.textContent = 'old long'
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    expect(onSubmit).toHaveBeenCalledWith('old long', expect.anything())
+  })
+
+  it('submits nothing from an emptied composer, never the previous draft', () => {
+    const { editorRef, hook, onSubmit } = renderSubmitHook({ text: 'Artifact — same seven tails, logged' })
+
+    editorRef.current!.textContent = ''
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })
