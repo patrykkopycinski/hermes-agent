@@ -298,6 +298,16 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     # every client reconcile without parsing tool args.
     if todo_state is not None:
         _emit("todo.updated", sid, todo_state)
+    # Same for persisted goal state: goal_criteria mutates subgoals/gates mid-turn, and the Desktop
+    # card repaints from session.control.update — without this the card keeps the /goal-set snapshot
+    # (Criteria · 0) until the turn ends and the post-turn publish fires.
+    if name in _SESSION_CONTROL_MUTATING_TOOLS and session is not None:
+        _publish_session_control_snapshot(sid, session, only_if_present=True)
+
+
+# Tools (agent-facing, not slash dispatch) whose completion changes persisted session-control state.
+# Slash paths already publish via _SESSION_CONTROL_SLASHES in methods_session_control.
+_SESSION_CONTROL_MUTATING_TOOLS = frozenset({"goal_criteria"})
 
 
 # ── _on_tool_progress dispatch: each handler takes (sid, name, preview, kw) ─────────────────────
