@@ -16,7 +16,7 @@ import plugins.memory.es_memory as es_memory
 from plugins.memory import find_provider_dir
 from plugins.memory.config_schema import KIND_SECRET, STORAGE_FLAT_JSON, get_provider_config_schema
 from plugins.memory.es_memory import _STRATEGIES, EsMemoryProvider
-from tools.lazy_deps import LAZY_DEPS
+from pm.extras import ANCHORS
 
 
 # -- declared schema ------------------------------------------------------
@@ -98,7 +98,7 @@ def test_available_even_when_the_sdk_is_absent(configured, monkeypatch):
 
 
 def test_initialize_degrades_quietly_without_the_sdk(tmp_path, configured, monkeypatch):
-    monkeypatch.setattr("tools.lazy_deps.ensure", lambda *a, **k: None)
+    monkeypatch.setattr("pm.ensure_import", lambda *a, **k: None, raising=False)
     _block_elasticsearch_import(monkeypatch)
 
     provider = EsMemoryProvider()
@@ -150,6 +150,5 @@ def test_tool_call_reports_the_configuration_problem(tmp_path, configured, monke
 
 
 def test_lazy_dependency_is_allowlisted():
-    """The SDK only installs on a sealed image if the feature is in the allowlist."""
-    assert "memory.es_memory" in LAZY_DEPS
-    assert any(spec.startswith("elasticsearch") for spec in LAZY_DEPS["memory.es_memory"])
+    """The SDK only installs on a sealed image if the extra is anchored for pm.ensure_import."""
+    assert ANCHORS["es-memory"] == "elasticsearch"

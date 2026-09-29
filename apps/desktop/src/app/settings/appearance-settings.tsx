@@ -26,6 +26,8 @@ import {
   setInterfaceMode
 } from '@/store/interface-mode'
 import { $introSplash, setIntroSplash } from '@/store/intro-splash'
+import { $fileBrowserOpen, setFileBrowserOpen } from '@/store/layout'
+import { $showModelPricing, setShowModelPricing } from '@/store/model-pricing'
 import { notifyError } from '@/store/notifications'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enabled'
@@ -73,6 +75,7 @@ import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/use
 
 import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
 
+import { AppearanceExtraSlot } from './appearance-contrib'
 import type { AppearanceSubpageId } from './appearance-subpages'
 import { ChatFontSetting } from './chat-font-setting'
 import { MODE_OPTIONS } from './constants'
@@ -429,6 +432,8 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
   const embedMode = useStore($embedMode)
   const embedAllowed = useStore($embedAllowed)
   const composerPopoutGesturesEnabled = useStore($composerPopoutGesturesEnabled)
+  const fileBrowserOpen = useStore($fileBrowserOpen)
+  const fileBrowserShadowed = useStore($modeShadowed('fileBrowserOpen'))
   const translucency = useStore($translucency)
   const glassMode = translucency.mode === 'glass' && GLASS_SUPPORTED
   const userBubbleTransparency = useStore($userBubbleTransparency)
@@ -440,6 +445,7 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
   const vibeHeartsEnabled = useStore($vibeHeartsEnabled)
   const backdrop = useStore($backdrop)
   const introSplash = useStore($introSplash)
+  const showModelPricing = useStore($showModelPricing)
   const installs = useStore($marketplaceInstalls)
   const profiles = useStore($profiles)
   const activeProfileKey = normalizeProfileKey(useStore($activeGatewayProfile))
@@ -923,6 +929,29 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
             />
           )}
 
+          {show('general') && (
+            <ToggleRow
+              checked={showModelPricing}
+              description={a.modelPricingDesc}
+              id={settingElementId(ids.modelPricing)}
+              label={a.modelPricingTitle}
+              onChange={setShowModelPricing}
+            />
+          )}
+
+          {/* The same state as the titlebar toggle / ⌘J, which persists across
+              launches — so this is the file browser's standing default. Simple
+              mode shadows it; a flip there only lasts the session, so say so. */}
+          {show('window-layout') && (
+            <ToggleRow
+              checked={fileBrowserOpen}
+              description={withModeNote(a.fileBrowserDesc, fileBrowserShadowed)}
+              id={settingElementId(ids.fileBrowser)}
+              label={a.fileBrowserTitle}
+              onChange={setFileBrowserOpen}
+            />
+          )}
+
           {show('window-layout') && (
             <ToggleRow
               checked={composerPopoutGesturesEnabled}
@@ -1050,6 +1079,12 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
           <PetSettings />
         </div>
       )}
+
+      {/* Plugin-provided appearance controls — the sanctioned seam for a
+          plugin that used to inject nodes into this page. Top-level page only:
+          a deep-link subpage shows one built-in section, and a plugin card is
+          not that section. */}
+      {subpage === undefined && <AppearanceExtraSlot />}
     </SettingsContent>
   )
 }

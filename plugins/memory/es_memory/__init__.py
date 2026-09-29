@@ -159,9 +159,9 @@ class _EsClient:
 
     def connect(self) -> None:
         """Build the underlying client. Raises on a missing SDK or unusable config."""
-        from tools import lazy_deps
+        from pm import ensure_import
 
-        lazy_deps.ensure("memory.es_memory", prompt=False)
+        ensure_import("es-memory")
         from elasticsearch import Elasticsearch
 
         kwargs: Dict[str, Any] = {"request_timeout": self._timeout}
