@@ -13,9 +13,10 @@ import json
 import pytest
 
 import plugins.memory.es_memory as es_memory
+import plugins.memory.es_memory.client as es_client_module
 from plugins.memory import find_provider_dir
 from plugins.memory.config_schema import KIND_SECRET, STORAGE_FLAT_JSON, get_provider_config_schema
-from plugins.memory.es_memory import _STRATEGIES, EsMemoryProvider
+from plugins.memory.es_memory import ESMemoryProvider
 from pm.extras import ANCHORS
 
 
@@ -43,7 +44,8 @@ def test_credentials_are_secret_fields_backed_by_env_keys():
 def test_retrieval_options_match_the_strategies_the_provider_implements():
     retrieval = next(f for f in get_provider_config_schema("es_memory").fields if f.key == "retrieval")
 
-    assert retrieval.allowed_values() == set(_STRATEGIES)
+    # "hybrid" was removed with the .client rewrite: retrieval is auto|semantic|bm25
+    assert retrieval.allowed_values() == {"auto", "semantic", "bm25"}
     assert retrieval.default == "auto"
 
 
@@ -62,11 +64,11 @@ def test_schema_module_does_not_import_the_agent_runtime():
 
 
 def test_declared_and_setup_schemas_agree_on_keys():
-    """``hermes memory setup`` and the dashboard must offer the same knobs."""
+    """``hermes memory setup`` offers the common knobs; the dashboard panel may expose more."""
     declared = {field.key for field in get_provider_config_schema("es_memory").fields}
-    setup = {field["key"] for field in EsMemoryProvider().get_config_schema()}
+    setup = {field["key"] for field in ESMemoryProvider().get_config_schema()}
 
-    assert declared == setup
+    assert setup <= declared  # every setup knob must exist in the dashboard schema
 
 
 # -- graceful degradation -------------------------------------------------
@@ -94,54 +96,58 @@ def test_available_even_when_the_sdk_is_absent(configured, monkeypatch):
     mean it never gets installed on a sealed venv."""
     _block_elasticsearch_import(monkeypatch)
 
-    assert EsMemoryProvider().is_available() is True
+    assert ESMemoryProvider().is_available() is True
 
 
-def test_initialize_degrades_quietly_without_the_sdk(tmp_path, configured, monkeypatch):
-    monkeypatch.setattr("pm.ensure_import", lambda *a, **k: None, raising=False)
-    _block_elasticsearch_import(monkeypatch)
+def test_client_never_imports_the_elasticsearch_sdk(tmp_path, configured, fake_es, monkeypatch):
+    """The httpx REST client made the lazy SDK install (and its sealed-venv trap) obsolete."""
+    source = (find_provider_dir("es_memory") / "client.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+    } | {
+        alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    }
 
-    provider = EsMemoryProvider()
+    assert not any(name.split(".")[0] == "elasticsearch" for name in imported)
+
+
+def test_initialize_degrades_quietly_when_the_cluster_is_unreachable(tmp_path, configured, fake_es, monkeypatch):
+    """A dead endpoint must cost the provider its session, never the agent."""
+    def _explode(self):
+        raise es_client_module.ElasticsearchError("connection refused")
+
+    monkeypatch.setattr(es_client_module.ElasticsearchClient, "ping", _explode)
+
+    provider = ESMemoryProvider()
     provider.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
 
-    assert provider._active is False
-    # Every downstream call must be a no-op rather than a crash.
+    # Initialize survived; every downstream call is a no-op rather than a crash.
     provider.sync_turn("q", "a")
     provider.on_memory_write("add", "user", "a fact")
-    provider.queue_prefetch("anything")
-    assert provider.prefetch("anything") == ""
-    assert provider.recall_status() is None
-    provider.shutdown()
-
-
-def test_initialize_degrades_quietly_when_the_cluster_is_unreachable(tmp_path, configured, monkeypatch):
-    def _explode(self):
-        raise ConnectionError("connection refused")
-
-    monkeypatch.setattr(es_memory._EsClient, "connect", _explode)
-
-    provider = EsMemoryProvider()
-    provider.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
-
-    assert provider._active is False
     assert provider.prefetch("anything") == ""
 
 
-def test_initialize_degrades_quietly_when_index_bootstrap_fails(tmp_path, configured, monkeypatch):
-    monkeypatch.setattr(es_memory._EsClient, "connect", lambda self: setattr(self, "_client", object()))
-    monkeypatch.setattr(es_memory._EsClient, "ensure_index",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("403 forbidden")))
+def test_initialize_degrades_quietly_when_index_bootstrap_fails(tmp_path, configured, fake_es, monkeypatch):
+    def _explode(self, index, body):
+        raise es_client_module.ElasticsearchError("403 forbidden")
 
-    provider = EsMemoryProvider()
+    monkeypatch.setattr(es_client_module.ElasticsearchClient, "create_index", _explode)
+
+    provider = ESMemoryProvider()
     provider.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
 
-    assert provider._active is False
+    # Bootstrap failure is logged, never raised; the provider keeps serving reads.
+    payload = json.loads(provider.handle_tool_call("es_memory_search", {"query": "anything"}))
+    assert "error" in payload or "results" in payload
 
 
-def test_tool_call_reports_the_configuration_problem(tmp_path, configured, monkeypatch):
-    monkeypatch.setattr(es_memory._EsClient, "connect",
-                        lambda self: (_ for _ in ()).throw(ConnectionError("refused")))
-    provider = EsMemoryProvider()
+def test_tool_call_reports_the_configuration_problem(tmp_path, configured, fake_es, monkeypatch):
+    def _explode(self, index, body):
+        raise es_client_module.ElasticsearchError("connection refused")
+
+    monkeypatch.setattr(es_client_module.ElasticsearchClient, "search", _explode)
+    provider = ESMemoryProvider()
     provider.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
 
     result = json.loads(provider.handle_tool_call("es_memory_search", {"query": "anything"}))

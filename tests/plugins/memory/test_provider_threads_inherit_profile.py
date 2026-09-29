@@ -81,9 +81,9 @@ def _honcho(seen, tmp_path):
 def _es_memory(seen, tmp_path):
     import plugins.memory.es_memory as es_memory
 
-    p = es_memory.EsMemoryProvider()
-    p._active = True
-    p._recall = lambda query: (seen.setdefault("home", get_hermes_home()) and "text", 1)
+    p = es_memory.ESMemoryProvider()
+    p._client = object()  # type: ignore[assignment]  # queue_prefetch no-ops without one
+    p._search = lambda query, **kw: (seen.setdefault("home", get_hermes_home()), [])[1]
     p.queue_prefetch("remember this")
     return [p._prefetch_thread]
 

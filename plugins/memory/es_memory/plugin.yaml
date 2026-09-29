@@ -1,6 +1,4 @@
 name: es_memory
 version: 0.1.0
-description: "Elasticsearch — episodic turn capture and long-term facts with ELSER semantic_text recall and BM25 fallback."
-pip_dependencies:
-  - "elasticsearch>=9,<10"
+description: "Elasticsearch memory — one index per profile with BM25 and semantic_text/ELSER recall, degrading to BM25 when the cluster will not run inference."
 requires_env: []

@@ -51,6 +51,10 @@ class FakeElasticsearch:
             return _ok({"cluster_name": "fake", "version": {"number": "9.6.0"}})
         if match := re.fullmatch(r"/([^/]+)/_doc/([^/]+)", path):
             return self._document(request.method, match.group(1), match.group(2), body)
+        if match := re.fullmatch(r"/([^/]+)/_update/([^/]+)", path):
+            return self._update(match.group(1), match.group(2), body)
+        if match := re.fullmatch(r"/([^/]+)/_update_by_query", path):
+            return self._update_by_query(match.group(1), body)
         if match := re.fullmatch(r"/([^/]+)/_search", path):
             return self._search(match.group(1), body)
         if match := re.fullmatch(r"/([^/]+)/_count", path):
@@ -84,6 +88,23 @@ class FakeElasticsearch:
             return _error(403, "security_exception", LICENSE_ERROR)
         self.documents.setdefault(index, {})[doc_id] = body
         return _ok({"result": "created", "_id": doc_id})
+
+    def _update(self, index: str, doc_id: str, body: dict[str, Any]) -> httpx.Response:
+        """Partial update: apply ``doc`` onto the stored source; 404 when missing."""
+        document = self.documents.get(index, {}).get(doc_id)
+        if document is None:
+            return _error(404, "document_missing_exception", f"[{doc_id}]: document missing")
+        document.update(body.get("doc") or {})
+        return _ok({"result": "updated"})
+
+    def _update_by_query(self, index: str, body: dict[str, Any]) -> httpx.Response:
+        """Flip ``active`` per the script for every document matching the query."""
+        query = body.get("query") or {}
+        matched = self._matching(index, query)
+        for doc_id, _source in matched:
+            if "ctx._source.active = false" in str((body.get("script") or {}).get("source")):
+                self.documents[index][doc_id]["active"] = False
+        return _ok({"updated": len(matched)})
 
     def _search(self, index: str, body: dict[str, Any]) -> httpx.Response:
         self.search_bodies.append(body)
