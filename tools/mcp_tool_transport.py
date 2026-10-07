@@ -22,6 +22,39 @@ from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
 
+_VALID_CACHE_SCOPES = frozenset({"public", "private"})
+
+
+def _drop_invalid_cache_scope(raw, server_name: str):
+    """Drop a ``cacheScope`` the SDK's ``Literal["public", "private"]`` would reject (e.g. the empty
+    string envoy-ai-gateway sends), so the result parses with the SDK default (``private``).
+    Valid values and non-dict results pass through untouched."""
+    if isinstance(raw, dict) and "cacheScope" in raw and raw["cacheScope"] not in _VALID_CACHE_SCOPES:
+        logger.debug("MCP server '%s': ignoring invalid cacheScope %r (using SDK default 'private')",
+                     server_name, raw["cacheScope"])
+        del raw["cacheScope"]
+    return raw
+
+
+def _guard_cache_scope(session, server_name: str):
+    """Wrap the session dispatcher's ``send_raw_request`` — the single choke point every result
+    (tools/resources/prompts list, discover, ...) crosses before SDK model validation — so a bad
+    ``cacheScope`` from a non-conforming server cannot fail the whole listing."""
+    dispatcher = getattr(session, "_dispatcher", None)
+    send_raw = getattr(dispatcher, "send_raw_request", None)
+    if send_raw is None or getattr(send_raw, "_hermes_cache_scope_guard", False):
+        return session
+
+    async def send_raw_request(*args, **kwargs):
+        return _drop_invalid_cache_scope(await send_raw(*args, **kwargs), server_name)
+
+    send_raw_request._hermes_cache_scope_guard = True
+    try:
+        dispatcher.send_raw_request = send_raw_request
+    except Exception:  # slotted/frozen dispatcher on some SDK build: leave the SDK path as-is
+        logger.debug("MCP server '%s': cannot install cacheScope guard", server_name)
+    return session
+
 _PROBE_INITIALIZE_BODY = (  # JSON-RPC ``initialize`` body for the content-type preflight POST
     '{"jsonrpc":"2.0","id":"_probe","method":"initialize","params":{"protocolVersion":"2025-03-26",'
     '"capabilities":{},"clientInfo":{"name":"hermes-probe","version":"0.1"}}}')
@@ -285,6 +318,7 @@ class MCPServerTransportMixin:
         try:
             async with transport_cm as _streams:
                 async with _core.ClientSession(_streams[0], _streams[1], **self._session_kwargs()) as session:
+                    _guard_cache_scope(session, self.name)
                     return await self._serve_session(session, connect_timeout, label)
         except BaseExceptionGroup as _eg:
             return self._reconnect_or_reraise_group(_eg)
@@ -408,6 +442,7 @@ class MCPServerTransportMixin:
                     self._track_spawned_children(new_pids)
                 self._stdio_child_pids = set(new_pids)  # so in-flight calls fail fast when the child dies
                 async with _core.ClientSession(read_stream, write_stream, **self._session_kwargs()) as session:
+                    _guard_cache_scope(session, self.name)
                     # Bound the handshake here (``connect_timeout`` only bounds the caller's ``.result()``):
                     # a server that never answers ``initialize`` would leak child + pipes per retry until EMFILE.
                     connect_timeout = float(config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT))
