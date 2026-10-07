@@ -248,7 +248,9 @@ class _KanbanDispatcher:
         """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
 
         Runs before dispatch fans out; the per-tick cap keeps a bulk triage
-        load from burst-spending the aux LLM. Returns the number decomposed.
+        load from burst-spending the aux LLM. Returns the number decomposed. Parked
+        (block-loop) and previously-run triage tasks are skipped; see
+        ``kanban_decompose.list_auto_decomposable_ids``.
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
@@ -268,9 +270,9 @@ class _KanbanDispatcher:
                 try:
                     os.environ["HERMES_KANBAN_BOARD"] = slug
                     try:
-                        triage_ids = _decomp.list_triage_ids()
+                        triage_ids = _decomp.list_auto_decomposable_ids()
                     except Exception as exc:
-                        logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
+                        logger.debug("kanban auto-decompose: list_auto_decomposable_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []
                     for tid in triage_ids:
                         if attempted >= auto_decompose_per_tick:

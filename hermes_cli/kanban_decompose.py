@@ -341,3 +341,40 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
     return [row.id for row in rows]
+
+
+def _parked_reason(conn, task: "kb.Task") -> Optional[str]:
+    """Why the AUTO decomposer must leave this triage task alone, or None.
+
+    ``block_recurrences`` is the counter ``kb._route_block`` itself compares to
+    ``BLOCK_RECURRENCE_LIMIT`` when it escalates a block loop to triage. It is a
+    task column: it is never pruned (``gc_events`` deletes old events, though only
+    for done/archived tasks) and a single read decides. A task that already
+    executed (any ``task_runs`` row) is not a fresh idea either.
+    """
+    if task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT:
+        return f"block loop escalation (block_recurrences={task.block_recurrences})"
+    if kb.latest_run(conn, task.id) is not None:
+        return "has prior runs"
+    return None
+
+
+def list_auto_decomposable_ids(*, tenant: Optional[str] = None) -> list[str]:
+    """Triage ids the gateway's per-tick auto-decomposer may fan out.
+
+    Skips tasks a human parked (block-loop escalation) and tasks that already ran.
+    Manual ``hermes kanban decompose`` (id or ``--all``) uses :func:`list_triage_ids`
+    / the id directly and is unaffected: that is explicit human action.
+    Skipped tasks stay in triage for a human; they are filtered out here, so they
+    neither burn the per-tick cap nor get retried.
+    """
+    ids: list[str] = []
+    with kbc.connect_closing() as conn:
+        for task in kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000):
+            reason = _parked_reason(conn, task)
+            if reason is None:
+                ids.append(task.id)
+            else:
+                logger.debug("kanban auto-decompose: skipping %s (%s); left in triage for a human",
+                             task.id, reason)
+    return ids
