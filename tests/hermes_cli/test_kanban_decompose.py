@@ -175,3 +175,33 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert "not in triage" in outcome.reason
 
 
+def test_manual_decompose_by_id_still_works_on_block_loop_parked_task(kanban_home):
+    """Only the automatic tick skips parked tasks; explicit human action proceeds."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="parked", assignee="worker")
+        for _ in range(kb.BLOCK_RECURRENCE_LIMIT):
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+            assert kb.claim_task(conn, tid, claimer="worker") is not None
+            kb.block_task(conn, tid, reason="collision", kind="capability")
+            if kb.get_task(conn, tid).status == "blocked":
+                kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "triage"
+    assert tid not in decomp.list_auto_decomposable_ids()
+    assert tid in decomp.list_triage_ids()  # what ``decompose --all`` uses
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True, "rationale": "manual",
+        "tasks": [{"title": "one", "body": "b", "assignee": "engineer", "parents": []}],
+    })
+    patches = _patch_list_profiles(["orchestrator", "engineer"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+    assert outcome.ok, outcome.reason
+    assert outcome.fanout is True
