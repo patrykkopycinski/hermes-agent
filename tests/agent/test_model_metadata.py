@@ -1611,6 +1611,34 @@ class TestParseContextLimitFromError:
         assert get_context_length_from_provider_error(msg, 32768) is None
 
 
+    @pytest.mark.parametrize("msg", [
+        "request (66123 tokens) exceeds the available context size (65536 tokens), try increasing it",
+        "Error code: 400 - {'error': {'code': 400, 'message': 'request (66123 tokens) exceeds the "
+        "available context size (65536 tokens), try increasing it', 'type': 'exceed_context_size_error', "
+        "'n_prompt_tokens': 66123, 'n_ctx': 65536}}",
+    ])
+    def test_llama_cpp_available_context_size(self, msg):
+        """llama.cpp llama-server reports the window in parentheses after "available context size";
+        the larger request count before it must NOT be captured."""
+        assert parse_context_limit_from_error(msg) == 65536
+
+    def test_llama_cpp_overflow_recalibrates_window(self):
+        from agent.model_metadata import get_context_length_from_provider_error
+
+        msg = "request (66123 tokens) exceeds the available context size (65536 tokens), try increasing it"
+        assert get_context_length_from_provider_error(msg, 256_000) == 65536
+        assert get_context_length_from_provider_error(msg, 65536) is None
+
+    def test_llama_cpp_pattern_leaves_other_providers_unchanged(self):
+        for msg, expected in [
+            ("This model's maximum context length is 32768 tokens. However, you requested 40000 tokens", 32768),
+            ("max_model_len 32768", 32768),
+            ("input token count is 32825 but model only supports up to 32768", 32768),
+            ("250000 tokens > 200000 maximum", 200000),
+            ("prompt is too long for the available context", None),
+        ]:
+            assert parse_context_limit_from_error(msg) == expected, msg
+
     def test_output_cap_message_is_not_a_context_limit(self):
         """An output-cap error must never be cached as the context window (salvage #106769):
         the generic "limit ... of N" pattern matched Switchyard's message and clamped a

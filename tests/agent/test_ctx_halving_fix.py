@@ -103,6 +103,37 @@ class TestContextOverflowLimitSelection:
 
         assert get_context_length_from_provider_error(error_msg, 272_000) is None
 
+    def test_llama_cpp_overflow_lowers_compressor_threshold(self, monkeypatch):
+        """Custom model with no known window (256K fallback, 180K threshold cap): one llama.cpp
+        overflow error must teach the compressor the real 65,536 window, so the compression
+        trigger drops below it instead of staying at 180K and death-looping."""
+        from types import SimpleNamespace
+
+        from agent import turn_overflow
+        from agent.context_compressor import ContextCompressor
+
+        saved = []
+        monkeypatch.setattr("agent.model_metadata.save_provider_context_length",
+                            lambda *a, **k: saved.append(a))
+        base_url = "http://127.0.0.1:9/v1"
+        compressor = ContextCompressor(
+            "local-reasoning", provider="custom", base_url=base_url, quiet_mode=True,
+            config_context_length=256_000, threshold_tokens_cap=180_000,
+        )
+        assert compressor.context_length == 256_000 and compressor.threshold_tokens == 180_000
+        agent = SimpleNamespace(model="local-reasoning", provider="custom", api_mode="chat_completions",
+                                base_url=base_url, api_key="", context_compressor=compressor,
+                                _buffer_vprint=lambda *a, **k: None)
+        error_msg = ("request (66123 tokens) exceeds the available context size (65536 tokens), "
+                     "try increasing it")
+
+        adopted = turn_overflow._adopt_provider_context_limit(SimpleNamespace(agent=agent), error_msg, 256_000)
+
+        assert adopted == 65_536
+        assert compressor.context_length == 65_536
+        assert compressor.threshold_tokens < 65_536
+        assert saved and saved[0][2] == 65_536
+
 # ---------------------------------------------------------------------------
 # build_anthropic_kwargs — output cap clamping
 # ---------------------------------------------------------------------------
