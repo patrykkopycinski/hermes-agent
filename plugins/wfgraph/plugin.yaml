@@ -1,0 +1,4 @@
+name: wfgraph
+version: 0.1.0
+description: "Author and run agent graphs — fan-out to parallel steps, gates that branch on a PASS/FAIL verdict, and rework loops that send a failed step back to be redone. Adds the `wfgraph` tool; graphs and runs live under HERMES_HOME/workflows, and cron/webhook triggers drive them without the desktop canvas."
+author: "brooklyn! (engine, PR #94367), extracted as a plugin"
